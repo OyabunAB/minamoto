@@ -9,8 +9,9 @@ plugins {
 
 dependencies {
     api(project(":minamoto-core"))
-    implementation(libs.bundles.core)
+    implementation(libs.bundles.core.postgres)
     testImplementation(libs.bundles.test)
+    testImplementation(libs.bundles.test.containers)
 }
 
 val signingKey: String? = System.getenv("GPG_SIGNING_KEY")

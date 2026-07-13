@@ -7,6 +7,7 @@ r2dbc_spi         = "1.0.0.RELEASE"
 slf4j             = "2.0.18"
 logback           = "1.5.18"
 aelv              = "1.0.0-rc.3"
+aelv_netty        = "0.0.0-SNAPSHOT"
 testcontainers    = "1.20.4"
 
 [libraries]
@@ -19,6 +20,7 @@ kotlin_test               = { group = "org.jetbrains.kotlin",  name = "kotlin-te
 kotlin_test_junit5        = { group = "org.jetbrains.kotlin",  name = "kotlin-test-junit5",                version.ref = "kotlin" }
 coroutines_test           = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test",           version.ref = "coroutines" }
 aelv                      = { group = "se.oyabun",             name = "aelv",                              version.ref = "aelv" }
+aelv_netty                = { group = "se.oyabun",             name = "aelv-netty",                        version.ref = "aelv_netty" }
 testcontainers_core       = { group = "org.testcontainers",    name = "testcontainers",                    version.ref = "testcontainers" }
 testcontainers_postgresql = { group = "org.testcontainers",    name = "postgresql",                        version.ref = "testcontainers" }
 testcontainers_junit5     = { group = "org.testcontainers",    name = "junit-jupiter",                     version.ref = "testcontainers" }
@@ -26,6 +28,7 @@ testcontainers_junit5     = { group = "org.testcontainers",    name = "junit-jup
 [bundles]
 core_api          = ["reactive_streams", "r2dbc_spi"]
 core              = ["coroutines_core", "slf4j_api", "aelv"]
+core_postgres     = ["coroutines_core", "slf4j_api", "aelv", "aelv_netty"]
 test              = ["kotlin_test", "kotlin_test_junit5", "coroutines_test", "logback_classic"]
 test_containers   = ["testcontainers_core", "testcontainers_postgresql", "testcontainers_junit5"]
 

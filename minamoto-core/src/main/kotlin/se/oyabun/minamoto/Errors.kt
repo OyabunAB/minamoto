@@ -50,9 +50,22 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
     class AuthenticationFailed(message: String, cause: Throwable? = null) :
         MinamotoException(message, cause)
 
-    /** The database server rejected the query. */
-    class QueryFailed(message: String, cause: Throwable? = null) :
-        MinamotoException(message, cause)
+    /**
+     * The database server rejected the query.
+     *
+     * [sqlState] is the 5-character SQLSTATE code from the server — use it to identify
+     * specific error conditions programmatically (e.g. `23505` for unique constraint violation).
+     * [severity] is the server-reported severity level (ERROR, FATAL, PANIC).
+     * [detail] and [hint] carry the optional extended fields from the server error response.
+     */
+    class QueryFailed(
+        message:          String,
+        val sqlState:     String,
+        val severity:     String,
+        val detail:       String = "",
+        val hint:         String = "",
+        cause:            Throwable? = null,
+    ) : MinamotoException(message, cause)
 
     /** A transaction could not be committed. */
     class CommitFailed(message: String, cause: Throwable? = null) :

@@ -19,15 +19,14 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 
-// ---------------------------------------------------------------------------
-// Row
-// ---------------------------------------------------------------------------
-
 /**
- * A single row returned from a query.
+ * A single result row from a query.
  *
- * Values are retrieved by column name using reified type inference —
- * no Java class literals.
+ * Use [get] when you expect a non-null value — it throws [MinamotoException.UnexpectedNull]
+ * if the column value is null. Use [getOrNull] when nulls are legitimate.
+ *
+ * Type conversion is handled by the driver's codec registry. Requesting an unsupported
+ * type throws [MinamotoException.CodecFailed].
  */
 interface Row {
     fun <T : Any> get(column: String): T
@@ -35,6 +34,12 @@ interface Row {
     val metadata: RowMetadata
 }
 
+/**
+ * Metadata for a single column in a result set.
+ *
+ * [type] reflects the database-side type. For PostgreSQL this is an OID ([ColumnType.Native]);
+ * for sources without a native type system it may be [ColumnType.Named].
+ */
 data class ColumnMetadata(
     val name:     String,
     val index:    Int,
@@ -42,89 +47,135 @@ data class ColumnMetadata(
     val nullable: Nullability,
 )
 
+/**
+ * Whether the database considers this column nullable.
+ *
+ * [Unknown] is returned when the driver cannot determine nullability from the wire protocol,
+ * e.g. for computed columns or certain query shapes.
+ */
 sealed interface Nullability {
     data object Nullable    : Nullability
     data object NonNullable : Nullability
     data object Unknown     : Nullability
 }
 
+/**
+ * The database-side type of a column.
+ *
+ * [Native] carries the raw OID as returned by PostgreSQL.
+ * [Named] is used by drivers that identify types by name rather than numeric ID.
+ */
 sealed interface ColumnType {
-    data class Named(val name: String)     : ColumnType
-    data class Native(val oid: Int)        : ColumnType
+    data class Named(val name: String) : ColumnType
+    data class Native(val oid: Int)    : ColumnType
 }
-
-data class RowMetadata(val columns: List<ColumnMetadata>) {
-    fun column(name: String): ColumnMetadata =
-        columns.firstOrNull { it.name == name }
-            ?: throw MinamotoException.UnknownColumn(name)
-}
-
-// ---------------------------------------------------------------------------
-// Operations — defined once, called many times
-// ---------------------------------------------------------------------------
 
 /**
- * A pre-configured query that maps rows to [T].
+ * Metadata for all columns in a result set.
  *
- * Call with parameters to produce a [Many] of results.
- * The underlying statement is prepared on first use and reused.
+ * [column] looks up by name and throws [MinamotoException.UnknownColumn] if not found.
+ * For positional access use [columns] directly.
+ */
+data class RowMetadata(val columns: List<ColumnMetadata>) {
+    fun column(name: String): ColumnMetadata =
+        columns.firstOrNull { it.name == name } ?: throw MinamotoException.UnknownColumn(name)
+}
+
+/**
+ * A pre-configured, reusable query that maps result rows to [T].
+ *
+ * Define it once against a [Database], then call it with parameters as needed.
+ * The underlying prepared statement is created on first execution and reused for
+ * the lifetime of the connection.
+ *
+ * Example:
+ * ```kotlin
+ * val findUser = db.query("SELECT * FROM users WHERE id = $1") { row ->
+ *     User(row.get("id"), row.get("name"))
+ * }
+ * val user: Many<User> = findUser(42)
+ * ```
  */
 fun interface Query<T : Any> {
     operator fun invoke(vararg params: Any): Many<T>
 }
 
 /**
- * A pre-configured command (INSERT / UPDATE / DELETE / DDL).
+ * A pre-configured, reusable command (INSERT / UPDATE / DELETE / DDL).
  *
- * Returns the number of rows affected.
+ * Returns the number of rows affected. For DDL statements that do not affect rows,
+ * the value is `0`.
+ *
+ * Example:
+ * ```kotlin
+ * val updateBalance = db.command("UPDATE accounts SET balance = $1 WHERE id = $2")
+ * val affected: One<Long> = updateBalance(100, 42)
+ * ```
  */
 fun interface Command {
     operator fun invoke(vararg params: Any): One<Long>
 }
 
 /**
- * A pre-configured command with no meaningful return value.
+ * A pre-configured, reusable command with no meaningful return value.
+ *
+ * Use for fire-and-forget operations like `NOTIFY`, `SET`, or DDL where
+ * the row count is irrelevant.
  */
 fun interface Effect {
     operator fun invoke(vararg params: Any): None<Unit>
 }
 
 /**
- * A pre-configured batch command.
+ * A pre-configured, reusable batch command.
  *
- * Each element in [batches] is one set of parameters.
- * Returns affected row counts in order.
+ * Sends multiple parameter sets in a single round-trip. Each element of [batches]
+ * is one set of bind parameters. Returns affected row counts in the same order
+ * as the input batches.
+ *
+ * Example:
+ * ```kotlin
+ * val insertUser = db.batch("INSERT INTO users (id, name) VALUES ($1, $2)")
+ * val counts: Many<Long> = insertUser(listOf(arrayOf(1, "walter"), arrayOf(2, "jesse")))
+ * ```
  */
 fun interface Batch {
     operator fun invoke(batches: List<Array<out Any>>): Many<Long>
 }
 
-// ---------------------------------------------------------------------------
-// Database handle — the entry point
-// ---------------------------------------------------------------------------
-
 /**
- * The top-level handle for defining and executing database operations.
+ * The top-level handle for interacting with the database.
  *
- * Acquires connections from the pool transparently.
- * Participates in any [ConnectionContext] already on the coroutine context.
+ * Operations are defined once via [query], [command], [effect], or [batch] and called
+ * repeatedly with parameters. Connection acquisition and release is fully transparent —
+ * the caller never holds a connection directly.
+ *
+ * Transactions are scoped to a coroutine via [transaction]. Any operation executed within
+ * a [transaction] block participates automatically — no connection or transaction handle
+ * is passed around.
+ *
+ * Example:
+ * ```kotlin
+ * db.transaction {
+ *     debit(accountId, amount)
+ *     credit(targetId, amount)
+ * }
+ * ```
+ *
+ * Nested [transaction] calls with [TransactionMode.Join] reuse the active transaction.
+ * [TransactionMode.New] always starts a fresh transaction, becoming a savepoint if one
+ * is already active.
  */
 interface Database {
 
-    fun <T : Any> query(
-        sql: String,
-        map: (Row) -> T,
-    ): Query<T>
-
+    fun <T : Any> query(sql: String, map: (Row) -> T): Query<T>
     fun command(sql: String): Command
-
     fun effect(sql: String): Effect
-
     fun batch(sql: String): Batch
 
     suspend fun <T> transaction(
-        mode:       TransactionMode        = TransactionMode.Join,
-        definition: TransactionDefinition  = TransactionDefinition(),
+        mode:       TransactionMode       = TransactionMode.Join,
+        definition: TransactionDefinition = TransactionDefinition(),
         block:      suspend () -> T,
     ): T
 }

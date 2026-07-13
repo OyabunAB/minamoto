@@ -18,10 +18,6 @@ package se.oyabun.minamoto
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
 
-// ---------------------------------------------------------------------------
-// Identity
-// ---------------------------------------------------------------------------
-
 @JvmInline
 value class ConnectionId(val value: Long)
 
@@ -31,35 +27,48 @@ value class TransactionId(val value: Long)
 @JvmInline
 value class SavepointId(val value: String)
 
-// ---------------------------------------------------------------------------
-// Connection state
-// ---------------------------------------------------------------------------
-
 sealed interface ConnectionState {
-    data object Idle        : ConnectionState
-    data object Acquired    : ConnectionState
-    data object Executing   : ConnectionState
+    data object Idle          : ConnectionState
+    data object Acquired      : ConnectionState
+    data object Executing     : ConnectionState
     data object InTransaction : ConnectionState
-    data object Closing     : ConnectionState
-    data object Closed      : ConnectionState
+    data object Closing       : ConnectionState
+    data object Closed        : ConnectionState
 }
 
-// ---------------------------------------------------------------------------
-// Transaction
-// ---------------------------------------------------------------------------
+/**
+ * Whether a connection passed a health check.
+ *
+ * [Invalid.reason] contains a human-readable description suitable for logging.
+ * The pool discards an [Invalid] connection and creates a replacement.
+ */
+sealed interface ValidationResult {
+    data object Valid                       : ValidationResult
+    data class  Invalid(val reason: String) : ValidationResult
+}
 
+/**
+ * Controls how [Database.transaction] behaves when a transaction is already active
+ * on the coroutine context.
+ *
+ * [Join] is the default and covers most use cases — services can call each other
+ * freely and all participate in the same transaction without coordination.
+ *
+ * [New] is for operations that must succeed or fail independently, such as audit
+ * logging or outbox writes that must not roll back with the outer transaction.
+ * When a transaction is already active, [New] creates a savepoint rather than
+ * a full nested transaction.
+ */
 sealed interface TransactionMode {
-    /** Use existing transaction from context if present, otherwise start a new one. */
     data object Join : TransactionMode
-    /** Always start a new transaction. Nested becomes a savepoint. */
     data object New  : TransactionMode
 }
 
 sealed interface IsolationLevel {
-    data object ReadUncommitted  : IsolationLevel
-    data object ReadCommitted    : IsolationLevel
-    data object RepeatableRead   : IsolationLevel
-    data object Serializable     : IsolationLevel
+    data object ReadUncommitted : IsolationLevel
+    data object ReadCommitted   : IsolationLevel
+    data object RepeatableRead  : IsolationLevel
+    data object Serializable    : IsolationLevel
 }
 
 sealed interface TransactionMutability {
@@ -67,10 +76,17 @@ sealed interface TransactionMutability {
     data object ReadOnly  : TransactionMutability
 }
 
+/**
+ * Options applied when starting a transaction.
+ *
+ * [deferrable] is PostgreSQL-specific — only meaningful with [IsolationLevel.Serializable]
+ * and [TransactionMutability.ReadOnly]. It allows the server to delay the transaction
+ * until it can run without blocking or being blocked.
+ */
 data class TransactionDefinition(
-    val isolation:   IsolationLevel        = IsolationLevel.ReadCommitted,
-    val mutability:  TransactionMutability = TransactionMutability.ReadWrite,
-    val deferrable:  Boolean               = false,
+    val isolation:  IsolationLevel        = IsolationLevel.ReadCommitted,
+    val mutability: TransactionMutability = TransactionMutability.ReadWrite,
+    val deferrable: Boolean               = false,
 )
 
 sealed interface TransactionState {
@@ -79,68 +95,103 @@ sealed interface TransactionState {
     data object RolledBack : TransactionState
 }
 
+/**
+ * The active transaction boundary at a given [ConnectionStack.Frame].
+ *
+ * [None] means the connection is held outside of any transaction.
+ * [Root] is a top-level transaction — committed or rolled back on block exit.
+ * [Savepoint] is a nested transaction within an enclosing [Root].
+ */
 sealed interface TransactionBoundary {
-    /** Top-level transaction — commit or rollback on exit. */
+    data object None : TransactionBoundary
+
     data class Root(
         val id:         TransactionId,
         val definition: TransactionDefinition,
         val state:      TransactionState = TransactionState.Active,
     ) : TransactionBoundary
 
-    /** Nested transaction — maps to a savepoint on the enclosing connection. */
     data class Savepoint(
-        val id:         SavepointId,
-        val state:      TransactionState = TransactionState.Active,
+        val id:    SavepointId,
+        val state: TransactionState = TransactionState.Active,
     ) : TransactionBoundary
 }
 
-// ---------------------------------------------------------------------------
-// Connection context — lives on the CoroutineContext
-// ---------------------------------------------------------------------------
+/**
+ * The connection stack carried by [ConnectionContext].
+ *
+ * [Empty] is the base case — no connections held, no transaction active.
+ * Each [Database.transaction] call or connection acquisition pushes a [Frame].
+ * On exit the frame is popped, and the connection is released or the savepoint
+ * resolved depending on [Frame.transaction].
+ */
+sealed interface ConnectionStack {
+    data object Empty : ConnectionStack
+
+    data class Frame(
+        val connection:  ConnectionId,
+        val transaction: TransactionBoundary,
+        val parent:      ConnectionStack,
+    ) : ConnectionStack
+}
+
+/**
+ * A single physical connection to the database server.
+ *
+ * Implemented by each driver. The pool holds instances of it.
+ * Callers never interact with this directly — they go through [Database].
+ */
+interface Connection {
+    val id:    ConnectionId
+    val state: ConnectionState
+    suspend fun ping(): ValidationResult
+    suspend fun close()
+}
+
+/**
+ * Creates, validates, and destroys physical [Connection]s.
+ *
+ * Each driver implements this interface and passes it to the pool at construction time.
+ * The pool calls [create] when it needs a new slot, [validate] before handing out a
+ * connection (subject to the configured [se.oyabun.minamoto.pool.ValidationQuery]), and
+ * [destroy] when evicting or shutting down.
+ */
+interface ConnectionFactory {
+    suspend fun create(): Connection
+    suspend fun validate(connection: Connection): ValidationResult
+    suspend fun destroy(connection: Connection)
+}
 
 /**
  * Tracks all connections held by the current coroutine chain.
  *
- * Shared by reference across flatMap fan-outs so the pool can detect
- * potential deadlocks before they occur.
+ * A single [ConnectionContext] instance is shared across all coroutines spawned from
+ * the same chain — including [se.oyabun.aelv.Many.flatMap] fan-outs — so the pool
+ * always has a complete view of what this chain holds. This is what makes deadlock
+ * detection reliable under recursive flatMap pipelines.
  *
- * [stack] is the current nesting level — each transaction push adds a frame.
- * [held] is shared across all frames and all concurrent children.
+ * [stack] reflects the current transaction nesting level.
+ * [held] is the shared reference-counted map of acquired connection IDs.
  */
 class ConnectionContext(
-    val stack: ConnectionFrame?,
+    val stack: ConnectionStack = ConnectionStack.Empty,
     val held:  ConcurrentHashMap<ConnectionId, Int> = ConcurrentHashMap(),
 ) : CoroutineContext.Element {
     override val key: CoroutineContext.Key<*> get() = ConnectionContext
 
     companion object : CoroutineContext.Key<ConnectionContext>
 
-    fun push(frame: ConnectionFrame): ConnectionContext =
-        ConnectionContext(frame, held)
+    fun push(frame: ConnectionStack.Frame): ConnectionContext = ConnectionContext(frame, held)
 
-    fun pop(): ConnectionContext =
-        ConnectionContext(stack?.parent, held)
+    fun pop(): ConnectionContext = ConnectionContext(
+        when (val s = stack) {
+            is ConnectionStack.Empty -> ConnectionStack.Empty
+            is ConnectionStack.Frame -> s.parent
+        },
+        held,
+    )
 
-    fun acquire(id: ConnectionId) {
-        held.merge(id, 1, Int::plus)
-    }
-
-    fun release(id: ConnectionId) {
-        held.compute(id) { _, count -> if (count == null || count <= 1) null else count - 1 }
-    }
-
+    fun acquire(id: ConnectionId) { held.merge(id, 1, Int::plus) }
+    fun release(id: ConnectionId) { held.compute(id) { _, n -> if (n == null || n <= 1) null else n - 1 } }
     fun holds(id: ConnectionId): Boolean = held.containsKey(id)
 }
-
-/**
- * A single frame on the connection stack.
- *
- * [connection] is the raw connection at this level.
- * [transaction] is the active transaction boundary at this level, if any.
- * [parent] is the enclosing frame.
- */
-data class ConnectionFrame(
-    val connection:  ConnectionId,
-    val transaction: TransactionBoundary?,
-    val parent:      ConnectionFrame?,
-)

@@ -9,6 +9,8 @@ logback           = "1.5.18"
 aelv              = "0.0.0-SNAPSHOT"
 aelv_netty        = "0.0.0-SNAPSHOT"
 testcontainers    = "2.0.5"
+serialization     = "1.8.1"
+datetime          = "0.6.2"
 
 [libraries]
 reactive_streams          = { group = "org.reactivestreams",   name = "reactive-streams",                  version.ref = "reactive_streams" }
@@ -24,16 +26,19 @@ aelv_netty                = { group = "se.oyabun",             name = "aelv-nett
 testcontainers_core       = { group = "org.testcontainers",    name = "testcontainers",                              version.ref = "testcontainers" }
 testcontainers_postgresql = { group = "org.testcontainers",    name = "testcontainers-postgresql",                   version.ref = "testcontainers" }
 testcontainers_junit5     = { group = "org.testcontainers",    name = "testcontainers-junit-jupiter",                version.ref = "testcontainers" }
+serialization_json        = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json",                  version.ref = "serialization" }
+datetime                  = { group = "org.jetbrains.kotlinx", name = "kotlinx-datetime",                              version.ref = "datetime" }
 
 [bundles]
 core_api          = ["reactive_streams", "r2dbc_spi"]
 core              = ["coroutines_core", "slf4j_api", "aelv"]
-core_postgres     = ["coroutines_core", "slf4j_api", "aelv", "aelv_netty"]
+core_postgres     = ["coroutines_core", "slf4j_api", "aelv", "aelv_netty", "serialization_json", "datetime"]
 test              = ["kotlin_test", "kotlin_test_junit5", "coroutines_test", "logback_classic"]
 test_containers   = ["testcontainers_core", "testcontainers_postgresql", "testcontainers_junit5"]
 
 [plugins]
 kotlin_jvm   = { id = "org.jetbrains.kotlin.jvm",              version.ref = "kotlin" }
+kotlin_serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 mavenPublish = { id = "maven-publish" }
 signing      = { id = "signing" }
 dokka        = { id = "org.jetbrains.dokka",                   version = "2.2.0" }

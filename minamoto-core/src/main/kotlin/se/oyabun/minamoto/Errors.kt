@@ -35,6 +35,10 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
     class PoolTimeout(message: String) :
         MinamotoException(message)
 
+    /** A pooled connection failed validation before being returned to a caller. */
+    class ValidationFailed(reason: String, cause: Throwable? = null) :
+        MinamotoException("connection validation failed: $reason", cause)
+
     /**
      * Acquiring a connection would deadlock the current coroutine chain —
      * all pool connections are already held by this chain.

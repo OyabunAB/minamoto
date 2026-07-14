@@ -21,11 +21,14 @@ import se.oyabun.minamoto.Connection
 import se.oyabun.minamoto.ConnectionFactory
 import se.oyabun.minamoto.ConnectionId
 import se.oyabun.minamoto.ConnectionState
+import se.oyabun.minamoto.MinamotoException
 import se.oyabun.minamoto.ValidationResult
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertIs
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -34,8 +37,8 @@ class MinamotoPoolTest {
     private val idCounter = AtomicLong(0)
 
     private fun fakeFactory(
-        healthy: Boolean = true,
-        onCreate: () -> Unit = {},
+        healthy:   Boolean   = true,
+        onCreate:  () -> Unit = {},
         onDestroy: () -> Unit = {},
     ): ConnectionFactory = object : ConnectionFactory {
         override suspend fun create(): Connection {
@@ -52,20 +55,42 @@ class MinamotoPoolTest {
         override suspend fun destroy(connection: Connection)  = connection.close()
     }
 
+    private fun failingFactory(failCount: Int): ConnectionFactory {
+        var attempts = 0
+        return object : ConnectionFactory {
+            override suspend fun create(): Connection {
+                if (++attempts <= failCount) throw RuntimeException("transient failure")
+                return fakeFactory().create()
+            }
+            override suspend fun validate(connection: Connection) = ValidationResult.Valid
+            override suspend fun destroy(connection: Connection)  {}
+        }
+    }
+
     private fun pool(
-        factory:    ConnectionFactory = fakeFactory(),
-        maxSize:    Int               = 2,
-        initialSize: Int              = 1,
-        minIdle:    Int               = 1,
-        acquireTimeout: kotlin.time.Duration = 1.seconds,
-        validation: ValidationQuery   = ValidationQuery.None,
+        factory:        ConnectionFactory            = fakeFactory(),
+        maxSize:        Int                          = 2,
+        initialSize:    Int                          = 1,
+        minIdle:        Int                          = 1,
+        acquireTimeout: kotlin.time.Duration         = 1.seconds,
+        validation:     ValidationQuery              = ValidationQuery.None,
+        eviction:       EvictionPolicy               = EvictionPolicy.OnRelease,
+        postAllocate:   ConnectionHook               = ConnectionHook.NoOp,
+        preRelease:     ConnectionHook               = ConnectionHook.NoOp,
+        idleTimeout:    kotlin.time.Duration         = 10.seconds,
+        maxLifetime:    kotlin.time.Duration         = 30.seconds,
     ) = MinamotoPool(
-        config  = PoolConfig(
+        config = PoolConfig(
             maxSize        = maxSize,
             initialSize    = initialSize,
             minIdle        = minIdle,
             acquireTimeout = acquireTimeout,
             validation     = validation,
+            eviction       = eviction,
+            postAllocate   = postAllocate,
+            preRelease     = preRelease,
+            idleTimeout    = idleTimeout,
+            maxLifetime    = maxLifetime,
         ),
         factory = factory,
     )
@@ -84,14 +109,14 @@ class MinamotoPoolTest {
     @Test
     fun `release returns slot to pool`() = runBlocking {
         withTimeout(5.seconds) {
-            val pool   = pool(maxSize = 1, initialSize = 1)
+            val pool  = pool(maxSize = 1, initialSize = 1)
             Thread.sleep(50)
-            val first  = pool.acquire() as AcquireResult.Acquired
+            val first = pool.acquire() as AcquireResult.Acquired
             pool.release(first.slot.id)
 
             val second = pool.acquire()
             assertIs<AcquireResult.Acquired>(second)
-            assertEquals(first.slot.id, second.slot.id)
+            assertEquals(first.slot.id, (second as AcquireResult.Acquired).slot.id)
             pool.close()
         }
     }
@@ -114,8 +139,11 @@ class MinamotoPoolTest {
         withTimeout(5.seconds) {
             var created   = 0
             var destroyed = 0
-            val factory   = fakeFactory(onCreate = { created++ }, onDestroy = { destroyed++ })
-            val pool      = pool(factory = factory, maxSize = 1, initialSize = 1)
+            val pool      = pool(
+                factory     = fakeFactory(onCreate = { created++ }, onDestroy = { destroyed++ }),
+                maxSize     = 1,
+                initialSize = 1,
+            )
             Thread.sleep(50)
 
             val result = pool.acquire() as AcquireResult.Acquired
@@ -131,47 +159,185 @@ class MinamotoPoolTest {
     @Test
     fun `postAllocate hook fires on acquire`() = runBlocking {
         withTimeout(5.seconds) {
-            var hookFired = false
-            val pool = pool(
-                factory = fakeFactory(),
-                maxSize = 1,
-                initialSize = 1,
-            ).also { it.close() }
+            var fired = false
+            val pool  = pool(postAllocate = ConnectionHook.Action { fired = true })
+            Thread.sleep(50)
+            pool.acquire()
+            pool.close()
 
-            val poolWithHook = MinamotoPool(
-                config  = PoolConfig(
-                    maxSize      = 1,
-                    initialSize  = 1,
-                    postAllocate = ConnectionHook.Action { hookFired = true },
-                ),
-                factory = fakeFactory(),
+            assertTrue(fired)
+        }
+    }
+
+    @Test
+    fun `postAllocate failure invalidates slot and throws`() = runBlocking {
+        withTimeout(5.seconds) {
+            var destroyed = 0
+            val pool = pool(
+                factory      = fakeFactory(onDestroy = { destroyed++ }),
+                maxSize      = 1,
+                initialSize  = 1,
+                postAllocate = ConnectionHook.Action { throw RuntimeException("hook failure") },
             )
             Thread.sleep(50)
-            poolWithHook.acquire()
-            poolWithHook.close()
 
-            assertEquals(true, hookFired)
+            assertFailsWith<MinamotoException.ConnectionLost> { pool.acquire() }
+            assertEquals(1, destroyed)
+            pool.close()
         }
     }
 
     @Test
     fun `preRelease hook fires on release`() = runBlocking {
         withTimeout(5.seconds) {
-            var hookFired = false
-            val poolWithHook = MinamotoPool(
-                config  = PoolConfig(
-                    maxSize     = 1,
-                    initialSize = 1,
-                    preRelease  = ConnectionHook.Action { hookFired = true },
-                ),
-                factory = fakeFactory(),
+            var fired = false
+            val pool  = pool(preRelease = ConnectionHook.Action { fired = true })
+            Thread.sleep(50)
+            val result = pool.acquire() as AcquireResult.Acquired
+            pool.release(result.slot.id)
+            pool.close()
+
+            assertTrue(fired)
+        }
+    }
+
+    @Test
+    fun `preRelease failure invalidates slot instead of returning to pool`() = runBlocking {
+        withTimeout(5.seconds) {
+            var destroyed = 0
+            val pool = pool(
+                factory    = fakeFactory(onDestroy = { destroyed++ }),
+                maxSize    = 1,
+                initialSize = 1,
+                preRelease = ConnectionHook.Action { throw RuntimeException("hook failure") },
             )
             Thread.sleep(50)
-            val result = poolWithHook.acquire() as AcquireResult.Acquired
-            poolWithHook.release(result.slot.id)
-            poolWithHook.close()
+            val result = pool.acquire() as AcquireResult.Acquired
+            pool.release(result.slot.id)
+            Thread.sleep(50)
 
-            assertEquals(true, hookFired)
+            assertEquals(1, destroyed)
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `release on unknown id is no-op`() = runBlocking {
+        withTimeout(5.seconds) {
+            val pool = pool()
+            Thread.sleep(50)
+            pool.release(ConnectionId(999L))
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `invalidate on unknown id is no-op`() = runBlocking {
+        withTimeout(5.seconds) {
+            val pool = pool()
+            Thread.sleep(50)
+            pool.invalidate(ConnectionId(999L))
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `slot evicted when maxLifetime exceeded on release`() = runBlocking {
+        withTimeout(5.seconds) {
+            var destroyed = 0
+            val pool = pool(
+                factory     = fakeFactory(onDestroy = { destroyed++ }),
+                maxSize     = 1,
+                initialSize = 1,
+                maxLifetime = 1.milliseconds,
+            )
+            Thread.sleep(50)
+            val result = pool.acquire() as AcquireResult.Acquired
+            Thread.sleep(10)
+            pool.release(result.slot.id)
+            Thread.sleep(50)
+
+            assertEquals(1, destroyed)
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `slot evicted when idleTimeout exceeded on release`() = runBlocking {
+        withTimeout(5.seconds) {
+            var destroyed = 0
+            val pool = pool(
+                factory     = fakeFactory(onDestroy = { destroyed++ }),
+                maxSize     = 1,
+                initialSize = 1,
+                idleTimeout = 1.milliseconds,
+            )
+            Thread.sleep(50)
+            val result = pool.acquire() as AcquireResult.Acquired
+            Thread.sleep(10)
+            pool.release(result.slot.id)
+            Thread.sleep(50)
+
+            assertEquals(1, destroyed)
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `validation rejects unhealthy connection and acquires replacement`() = runBlocking {
+        withTimeout(5.seconds) {
+            var callCount = 0
+            val factory = object : ConnectionFactory {
+                override suspend fun create(): Connection {
+                    val healthy = callCount++ > 0
+                    return object : Connection {
+                        override val id    = ConnectionId(idCounter.incrementAndGet())
+                        override val state = ConnectionState.Idle
+                        override suspend fun ping()  = if (healthy) ValidationResult.Valid
+                                                       else ValidationResult.Invalid("bad")
+                        override suspend fun close() {}
+                    }
+                }
+                override suspend fun validate(connection: Connection) = connection.ping()
+                override suspend fun destroy(connection: Connection)  {}
+            }
+            val pool = pool(factory = factory, validation = ValidationQuery.Local, maxSize = 2)
+            Thread.sleep(50)
+
+            val result = pool.acquire()
+            assertIs<AcquireResult.Acquired>(result)
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `acquireRetry succeeds after transient factory failure`() = runBlocking {
+        withTimeout(5.seconds) {
+            val pool = MinamotoPool(
+                config  = PoolConfig(maxSize = 1, initialSize = 1, acquireRetry = 2),
+                factory = failingFactory(failCount = 1),
+            )
+            Thread.sleep(100)
+
+            val result = pool.acquire()
+            assertIs<AcquireResult.Acquired>(result)
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `close destroys all slots`() = runBlocking {
+        withTimeout(5.seconds) {
+            var destroyed = 0
+            val pool = pool(
+                factory     = fakeFactory(onDestroy = { destroyed++ }),
+                maxSize     = 2,
+                initialSize = 2,
+            )
+            Thread.sleep(50)
+            pool.close()
+
+            assertEquals(2, destroyed)
         }
     }
 
@@ -189,6 +355,22 @@ class MinamotoPoolTest {
             assertEquals(1, pool.statistics.acquired)
 
             pool.release(slot.slot.id)
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `minIdle replacement is acquirable after invalidation`() = runBlocking {
+        withTimeout(5.seconds) {
+            val pool = pool(maxSize = 1, initialSize = 1, minIdle = 1)
+            Thread.sleep(50)
+
+            val first = pool.acquire() as AcquireResult.Acquired
+            pool.invalidate(first.slot.id)
+            Thread.sleep(100)
+
+            val second = pool.acquire()
+            assertIs<AcquireResult.Acquired>(second)
             pool.close()
         }
     }

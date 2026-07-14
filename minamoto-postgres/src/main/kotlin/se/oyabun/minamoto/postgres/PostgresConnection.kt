@@ -34,10 +34,20 @@ import se.oyabun.minamoto.ConnectionId
 import se.oyabun.minamoto.ConnectionState
 import se.oyabun.minamoto.MinamotoException
 import se.oyabun.minamoto.ValidationResult
+import se.oyabun.minamoto.postgres.codec.CodecRegistry
+import se.oyabun.minamoto.postgres.Parameter
 import se.oyabun.minamoto.postgres.protocol.BackendMessage
-import se.oyabun.minamoto.postgres.protocol.BackendMessage.*
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.NoticeResponse
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.NotificationResponse
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ParameterStatus
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ReadyForQuery
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage
-import se.oyabun.minamoto.postgres.protocol.FrontendMessage.*
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Bind
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Close
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Execute
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Parse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Sync
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Terminate
 import se.oyabun.minamoto.postgres.protocol.MessageDecoder
 import se.oyabun.minamoto.postgres.protocol.MessageEncoder
 import se.oyabun.minamoto.postgres.protocol.framed
@@ -51,14 +61,15 @@ import java.util.concurrent.ConcurrentLinkedQueue
  * The [InboundHandler] is installed in the pipeline during channel initialization so
  * no lifecycle events are missed before the first subscription.
  */
-internal class PgConnection(
+internal class PostgresConnection(
     override val id:         ConnectionId,
     private  val connection: NettyConnection,
     private  val transport:  NettyTransport,
+    internal val registry:   CodecRegistry    = CodecRegistry(),
     private  val allocator:  ByteBufAllocator = connection.channel.alloc(),
 ) : Connection {
 
-    private val log = Logging.of<PgConnection>()
+    private val log = Logging.of<PostgresConnection>()
 
     override var state: ConnectionState = ConnectionState.Idle
         private set
@@ -144,7 +155,7 @@ internal class PgConnection(
             exchange(
                 messages = listOf(
                     Parse("", "SELECT 1"),
-                    Bind("", "", emptyList()),
+                    Bind("", "", emptyList<Parameter>()),
                     Execute("", 1),
                     Sync,
                 ),
@@ -171,7 +182,7 @@ internal data class Conversation(
     val sink:      ReplaySink<BackendMessage>,
 )
 
-data class PostgresConfig(
+data class ConnectionConfig(
     val host:             String,
     val port:             Int    = 5432,
     val user:             String,
@@ -180,24 +191,24 @@ data class PostgresConfig(
     val defaultFetchSize: Int    = 50,
 )
 
-class PgConnectionFactory(
-    private val config: PostgresConfig,
+class PostgresConnectionFactory(
+    private val config: ConnectionConfig,
 ) : se.oyabun.minamoto.ConnectionFactory {
 
     private val transport = NettyTransport()
     private val idCounter = java.util.concurrent.atomic.AtomicLong(0)
 
     override suspend fun create(): se.oyabun.minamoto.Connection {
-        val connection = transport.connect(config.host, config.port)
+        val nettyConnection = transport.connect(config.host, config.port)
             .await()
             .rightOrThrow()
-        val conn = PgConnection(
+        val connection = PostgresConnection(
             id         = ConnectionId(idCounter.incrementAndGet()),
-            connection = connection,
+            connection = nettyConnection,
             transport  = transport,
         )
-        conn.handshake(config.user, config.password, config.database)
-        return conn
+        connection.handshake(config.user, config.password, config.database)
+        return connection
     }
 
     override suspend fun validate(connection: se.oyabun.minamoto.Connection): ValidationResult =

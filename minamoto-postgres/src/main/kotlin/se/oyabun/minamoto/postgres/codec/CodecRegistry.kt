@@ -26,11 +26,11 @@ import kotlin.reflect.typeOf
 /**
  * Pluggable extension point for registering additional codecs at pool creation time.
  *
- * Implementations are discovered via [ServiceLoader] unless disabled in [PgCodecRegistry].
+ * Implementations are discovered via [ServiceLoader] unless disabled in [CodecRegistry].
  * The registration order of SPI registrars is not guaranteed — do not rely on it.
  */
 interface CodecRegistrar {
-    fun register(registry: PgCodecRegistry)
+    fun register(registry: CodecRegistry)
 }
 
 /**
@@ -52,7 +52,7 @@ interface CodecRegistrar {
  * @param discoverRegistrars when true (default), [ServiceLoader] discovers [CodecRegistrar]
  *   implementations on the classpath and invokes them during construction
  */
-class PgCodecRegistry(
+class CodecRegistry(
     val json:               Json    = Json,
     val discoverRegistrars: Boolean = true,
 ) {

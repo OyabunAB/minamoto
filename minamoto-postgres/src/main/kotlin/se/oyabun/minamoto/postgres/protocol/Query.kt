@@ -16,33 +16,53 @@
 package se.oyabun.minamoto.postgres.protocol
 
 import se.oyabun.aelv.Many
+import se.oyabun.aelv.One
+import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
+import se.oyabun.aelv.fold
+import se.oyabun.aelv.rightOrThrow
 import se.oyabun.minamoto.MinamotoException
-import se.oyabun.minamoto.postgres.PgConnection
-import se.oyabun.minamoto.postgres.protocol.BackendMessage.*
-import se.oyabun.minamoto.postgres.protocol.FrontendMessage.*
+import se.oyabun.minamoto.Row
+import se.oyabun.minamoto.postgres.Column
+import se.oyabun.minamoto.postgres.Parameter
+import se.oyabun.minamoto.postgres.Parameters
+import se.oyabun.minamoto.postgres.PostgresConnection
+import se.oyabun.minamoto.postgres.PostgresRow
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.CommandComplete
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.DataRow
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ErrorResponse
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.PortalSuspended
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ReadyForQuery
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.RowDescription
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Bind
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Describe
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Execute
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Parse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Sync
 
 /**
- * Executes a query using the PGwire extended query protocol, streaming [DataRow]s.
+ * Executes a query using the PGwire extended query protocol, streaming typed [Row]s.
  *
- * Uses the unnamed portal and statement — postgres cleans these up automatically
- * at [ReadyForQuery]. Backpressure propagates via [Execute.maxRows]: the server only
- * sends as many rows as requested. [PortalSuspended] triggers subsequent [Execute]
- * messages until all rows are delivered.
+ * Sends Parse → Bind → Describe → Execute → Sync. The [RowDescription] received after
+ * Describe is used to build [Column] instances for each subsequent [DataRow].
+ * Backpressure propagates via [Execute.maxRows]: the server only sends as many rows as
+ * requested. [PortalSuspended] triggers subsequent [Execute] messages until all rows
+ * are delivered.
  */
-internal fun PgConnection.query(
-    sql:           String,
-    parameters:    List<ByteArray?> = emptyList(),
-    statementName: String           = "",
-    fetchSize:     Int              = 50,
-): Many<DataRow> {
+internal fun PostgresConnection.executeQuery(
+    sql:        String,
+    parameters: Parameters = emptyList(),
+    fetchSize:  Int             = 50,
+): Many<Row> {
     val portalName = ""
 
     return Many.defer(factory = suspend {
+        var descriptions: List<Column.Description> = emptyList()
+
         exchange(
             messages = listOf(
-                Parse(statementName, sql),
-                Bind(portalName, statementName, parameters),
+                Parse("", sql),
+                Bind(portalName, "", parameters),
                 Describe(DescribeTarget.Portal, portalName),
                 Execute(portalName, fetchSize),
                 Sync,
@@ -50,40 +70,85 @@ internal fun PgConnection.query(
             takeUntil = { it is ReadyForQuery },
         ).concatMap { message ->
             when (message) {
-                is DataRow         -> Many.items(message)
-                is PortalSuspended -> fetchMore(portalName, fetchSize)
-                is ErrorResponse   -> Many.error(MinamotoException.QueryFailed(
-                    message  = message.message,
-                    sqlState = message.sqlState,
-                    severity = message.severity,
-                    detail   = message.detail,
-                    hint     = message.hint,
-                ))
+                is RowDescription  -> { descriptions = message.columns; Many.empty() }
+                is DataRow         -> Many.items(buildRow(message, descriptions))
+                is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions)
+                is ErrorResponse   -> Many.error(message.asException())
                 else               -> Many.empty()
             }
         }
     })
 }
 
-private fun PgConnection.fetchMore(
-    portalName: String,
-    fetchSize:  Int,
-): Many<DataRow> = Many.defer(factory = suspend {
+/**
+ * Executes a command and returns the number of rows affected from [CommandComplete].
+ *
+ * The tag format is "INSERT 0 n", "UPDATE n", "DELETE n", "SELECT n", etc.
+ * The affected count is the last whitespace-delimited token.
+ */
+internal fun PostgresConnection.executeCommand(
+    sql:        String,
+    parameters: Parameters = emptyList(),
+): One<Long> {
+    return One.defer {
+        exchange(
+            messages = listOf(
+                Parse("", sql),
+                Bind("", "", parameters),
+                Describe(DescribeTarget.Portal, ""),
+                Execute("", 0),
+                Sync,
+            ),
+            takeUntil = { it is ReadyForQuery },
+        )
+            .fold(0L) { rowsAffected, message ->
+                when (message) {
+                    is CommandComplete -> message.tag.split(" ").last().toLongOrNull() ?: rowsAffected
+                    is ErrorResponse   -> throw message.asException()
+                    else               -> rowsAffected
+                }
+            }
+            .await()
+            .rightOrThrow()
+    }
+}
+
+private fun PostgresConnection.fetchMore(
+    portalName:   String,
+    fetchSize:    Int,
+    descriptions: List<Column.Description>,
+): Many<Row> = Many.defer(factory = suspend {
     exchange(
         messages  = listOf(Execute(portalName, fetchSize), Sync),
         takeUntil = { it is ReadyForQuery || it is PortalSuspended },
     ).concatMap { message ->
         when (message) {
-            is DataRow         -> Many.items(message)
-            is PortalSuspended -> fetchMore(portalName, fetchSize)
-            is ErrorResponse   -> Many.error(MinamotoException.QueryFailed(
-                message  = message.message,
-                sqlState = message.sqlState,
-                severity = message.severity,
-                detail   = message.detail,
-                hint     = message.hint,
-            ))
+            is DataRow         -> Many.items(buildRow(message, descriptions))
+            is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions)
+            is ErrorResponse   -> Many.error(message.asException())
             else               -> Many.empty()
         }
     }
 })
+
+private fun PostgresConnection.buildRow(
+    dataRow:      DataRow,
+    descriptions: List<Column.Description>,
+): PostgresRow {
+    val columns = descriptions.zip(dataRow.values) { description, bytes ->
+        Column(
+            description = description,
+            value       = if (bytes == null) Column.Value.Missing
+                          else Column.Value.Present(bytes),
+        )
+    }
+    return PostgresRow(columns, registry)
+}
+
+private fun ErrorResponse.asException() = MinamotoException.QueryFailed(
+    message  = message,
+    sqlState = sqlState,
+    severity = severity,
+    detail   = detail,
+    hint     = hint,
+)

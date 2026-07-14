@@ -17,7 +17,24 @@ package se.oyabun.minamoto.postgres.protocol
 
 import io.netty.buffer.ByteBuf
 import se.oyabun.minamoto.MinamotoException
-import se.oyabun.minamoto.postgres.protocol.BackendMessage.*
+import se.oyabun.minamoto.postgres.Column
+import se.oyabun.minamoto.postgres.protocol.Authentication
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.KeyData
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.BindComplete
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.CloseComplete
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.CommandComplete
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.DataRow
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.EmptyQueryResponse
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ErrorResponse
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.NoData
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.NoticeResponse
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.NotificationResponse
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ParameterDescription
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ParameterStatus
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ParseComplete
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.PortalSuspended
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ReadyForQuery
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.RowDescription
 
 /**
  * Decodes a single PGwire backend message from a [ByteBuf].
@@ -28,56 +45,53 @@ import se.oyabun.minamoto.postgres.protocol.BackendMessage.*
  */
 internal object MessageDecoder {
 
-    fun decode(buf: ByteBuf): BackendMessage {
-        val type   = buf.readByte().toInt().toChar()
-        buf.readInt() // length — already framed, skip
+    fun decode(buffer: ByteBuf): BackendMessage {
+        val type = buffer.readByte().toInt().toChar()
+        buffer.readInt() // length — already framed, skip
         return when (type) {
-            'R'  -> decodeAuthentication(buf)
-            'S'  -> ParameterStatus(buf.readCString(), buf.readCString())
-            'K'  -> BackendKeyData(buf.readInt(), buf.readInt())
-            'Z'  -> ReadyForQuery(decodeTransactionStatus(buf.readByte().toInt().toChar()))
-            't'  -> ParameterDescription(List(buf.readShort().toInt()) { buf.readInt() })
-            'T'  -> decodeRowDescription(buf)
-            'D'  -> decodeDataRow(buf)
-            'C'  -> CommandComplete(buf.readCString())
+            'R'  -> decodeAuthentication(buffer)
+            'S'  -> ParameterStatus(buffer.readCString(), buffer.readCString())
+            'K'  -> KeyData(buffer.readInt(), buffer.readInt())
+            'Z'  -> ReadyForQuery(decodeTransactionStatus(buffer.readByte().toInt().toChar()))
+            't'  -> ParameterDescription(List(buffer.readShort().toInt()) { buffer.readInt() })
+            'T'  -> decodeRowDescription(buffer)
+            'D'  -> decodeDataRow(buffer)
+            'C'  -> CommandComplete(buffer.readCString())
             '1'  -> ParseComplete
             '2'  -> BindComplete
             '3'  -> CloseComplete
             's'  -> PortalSuspended
             'n'  -> NoData
             'I'  -> EmptyQueryResponse
-            'E'  -> decodeErrorOrNotice(buf, notice = false)
-            'N'  -> decodeErrorOrNotice(buf, notice = true)
-            'A'  -> decodeNotification(buf)
+            'E'  -> decodeErrorOrNotice(buffer, notice = false)
+            'N'  -> decodeErrorOrNotice(buffer, notice = true)
+            'A'  -> decodeNotification(buffer)
             else -> throw MinamotoException.InvalidState("unknown backend message type: '$type'")
         }
     }
 
-    // ---------------------------------------------------------------------------
-
-    private fun decodeAuthentication(buf: ByteBuf): BackendMessage = when (val subtype = buf.readInt()) {
-        0    -> AuthenticationOk
-        3    -> AuthenticationCleartextPassword
-        5    -> AuthenticationMD5Password(ByteArray(4).also { buf.readBytes(it) })
+    private fun decodeAuthentication(buffer: ByteBuf): BackendMessage = when (val subtype = buffer.readInt()) {
+        0    -> Authentication.Ok
+        3    -> Authentication.CleartextPassword
+        5    -> Authentication.MD5Password(ByteArray(4).also { buffer.readBytes(it) })
         10   -> {
-            // AuthenticationSASL — list of mechanism names, null-terminated, double-null at end
             val mechanisms = mutableListOf<String>()
-            while (buf.isReadable) {
-                val name = buf.readCString()
+            while (buffer.isReadable) {
+                val name = buffer.readCString()
                 if (name.isEmpty()) break
                 mechanisms.add(name)
             }
-            AuthenticationSASL(mechanisms)
+            Authentication.SASL(mechanisms)
         }
         11   -> {
-            val data = ByteArray(buf.readableBytes())
-            buf.readBytes(data)
-            AuthenticationSASLContinue(data)
+            val data = ByteArray(buffer.readableBytes())
+            buffer.readBytes(data)
+            Authentication.SASLContinue(data)
         }
         12   -> {
-            val data = ByteArray(buf.readableBytes())
-            buf.readBytes(data)
-            AuthenticationSASLFinal(data)
+            val data = ByteArray(buffer.readableBytes())
+            buffer.readBytes(data)
+            Authentication.SASLFinal(data)
         }
         else -> throw MinamotoException.InvalidState("unsupported authentication type: $subtype")
     }
@@ -89,43 +103,43 @@ internal object MessageDecoder {
         else -> throw MinamotoException.InvalidState("unknown transaction status: '$char'")
     }
 
-    private fun decodeRowDescription(buf: ByteBuf): RowDescription {
-        val count = buf.readShort().toInt()
-        val columns = List(count) {
-            ColumnDescription(
-                name         = buf.readCString(),
-                tableOid     = buf.readInt(),
-                columnIndex  = buf.readShort(),
-                typeOid      = buf.readInt(),
-                typeSize     = buf.readShort(),
-                typeModifier = buf.readInt(),
-                formatCode   = buf.readShort(),
+    private fun decodeRowDescription(buffer: ByteBuf): RowDescription {
+        val columnCount = buffer.readShort().toInt()
+        val columns     = List(columnCount) {
+            Column.Description(
+                name         = buffer.readCString(),
+                tableOid     = buffer.readInt(),
+                columnIndex  = buffer.readShort(),
+                typeOid      = buffer.readInt(),
+                typeSize     = buffer.readShort(),
+                typeModifier = buffer.readInt(),
+                formatCode   = buffer.readShort(),
             )
         }
         return RowDescription(columns)
     }
 
-    private fun decodeDataRow(buf: ByteBuf): DataRow {
-        val count = buf.readShort().toInt()
-        val values = List(count) {
-            val length = buf.readInt()
+    private fun decodeDataRow(buffer: ByteBuf): DataRow {
+        val columnCount = buffer.readShort().toInt()
+        val values      = List(columnCount) {
+            val length = buffer.readInt()
             if (length == -1) null
-            else ByteArray(length).also { buf.readBytes(it) }
+            else ByteArray(length).also { buffer.readBytes(it) }
         }
         return DataRow(values)
     }
 
-    private fun decodeErrorOrNotice(buf: ByteBuf, notice: Boolean): BackendMessage {
+    private fun decodeErrorOrNotice(buffer: ByteBuf, notice: Boolean): BackendMessage {
         var severity = ""
         var sqlState = ""
         var message  = ""
         var detail   = ""
         var hint     = ""
 
-        while (buf.isReadable) {
-            val field = buf.readByte().toInt().toChar()
+        while (buffer.isReadable) {
+            val field = buffer.readByte().toInt().toChar()
             if (field == '\u0000') break
-            val value = buf.readCString()
+            val value = buffer.readCString()
             when (field) {
                 'S' -> severity = value
                 'C' -> sqlState = value
@@ -139,17 +153,17 @@ internal object MessageDecoder {
         else               ErrorResponse(severity, sqlState, message, detail, hint)
     }
 
-    private fun decodeNotification(buf: ByteBuf): NotificationResponse =
+    private fun decodeNotification(buffer: ByteBuf): NotificationResponse =
         NotificationResponse(
-            processId = buf.readInt(),
-            channel   = buf.readCString(),
-            payload   = buf.readCString(),
+            processId = buffer.readInt(),
+            channel   = buffer.readCString(),
+            payload   = buffer.readCString(),
         )
 
     private fun ByteBuf.readCString(): String {
-        val start = readerIndex()
-        while (readByte() != 0.toByte()) { /* scan */ }
-        val length = readerIndex() - start - 1
-        return getCharSequence(start, length, Charsets.UTF_8).toString()
+        val startIndex = readerIndex()
+        while (readByte() != 0.toByte()) { /* scan to null terminator */ }
+        val length = readerIndex() - startIndex - 1
+        return getCharSequence(startIndex, length, Charsets.UTF_8).toString()
     }
 }

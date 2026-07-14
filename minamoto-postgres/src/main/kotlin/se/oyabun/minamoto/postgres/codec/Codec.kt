@@ -35,7 +35,7 @@ enum class FormatCode(val wire: Short) {
  *
  * A codec is registered for a primary [oid] + [type] pair. The [oid] is the primary OID
  * this codec handles; additional OIDs (e.g. array OIDs or aliases) are handled by
- * registering the codec under multiple OIDs in [PgCodecRegistry].
+ * registering the codec under multiple OIDs in [CodecRegistry].
  *
  * [encode] produces the raw bytes and the format code to use in the `Bind` message.
  * [decode] receives the raw bytes from a `DataRow` and the actual OID from `RowDescription`

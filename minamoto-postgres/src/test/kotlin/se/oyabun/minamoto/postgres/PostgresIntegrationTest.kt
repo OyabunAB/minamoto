@@ -1,18 +1,23 @@
 package se.oyabun.minamoto.postgres
 
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
+import se.oyabun.aelv.One
+import se.oyabun.aelv.Verify
 import se.oyabun.aelv.await
+import se.oyabun.aelv.*
+import se.oyabun.aelv.map
 import se.oyabun.aelv.netty.NettyTransport
 import se.oyabun.aelv.rightOrThrow
-import se.oyabun.aelv.toList
+import se.oyabun.minamoto.ConnectionId
 import se.oyabun.minamoto.ConnectionState
+import se.oyabun.minamoto.MinamotoException
 import se.oyabun.minamoto.ValidationResult
 import se.oyabun.minamoto.postgres.protocol.handshake
-import se.oyabun.minamoto.postgres.protocol.query
+import se.oyabun.minamoto.postgres.query
+import se.oyabun.minamoto.postgres.get
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Integration tests against a local PostgreSQL instance.
@@ -36,98 +41,88 @@ import kotlin.test.assertIs
  */
 class PostgresIntegrationTest {
 
-    private val host = "localhost"
-    private val port = 15432
-    private val db   = "test"
+    private val host     = "localhost"
+    private val port     = 15432
+    private val database = "test"
 
-    private suspend fun connect(user: String, password: String): PgConnection {
-        val transport  = NettyTransport()
-        val connection = transport.connect(host, port).await().rightOrThrow()
-        val conn = PgConnection(
-            id         = se.oyabun.minamoto.ConnectionId(System.nanoTime()),
-            connection = connection,
-            transport  = transport,
+    private fun connect(user: String, password: String): One<PostgresConnection> =
+        One.defer {
+            val transport       = NettyTransport()
+            val nettyConnection = transport.connect(host, port).await().rightOrThrow()
+            val connection      = PostgresConnection(
+                id         = ConnectionId(System.nanoTime()),
+                connection = nettyConnection,
+                transport  = transport,
+            )
+            connection.handshake(user, password, database)
+            connection
+        }
+
+    @Test
+    fun `scram-sha-256 auth succeeds`() {
+        Verify.that(connect("test", "testpass"), timeout = 10.seconds)
+            .assertNext { assertEquals(ConnectionState.Idle, it.state) }
+            .completesNormally()
+    }
+
+    @Test
+    fun `md5 auth succeeds`() {
+        Verify.that(connect("testmd5", "testmd5pass"), timeout = 10.seconds)
+            .assertNext { assertEquals(ConnectionState.Idle, it.state) }
+            .completesNormally()
+    }
+
+    @Test
+    fun `trust auth succeeds`() {
+        Verify.that(connect("testtrust", ""), timeout = 10.seconds)
+            .assertNext { assertEquals(ConnectionState.Idle, it.state) }
+            .completesNormally()
+    }
+
+    @Test
+    fun `ping returns valid after connect`() {
+        Verify.that(
+            connect("test", "testpass").map(transform = suspend { connection: PostgresConnection ->
+                connection.ping().also { connection.close() }
+            }),
+            timeout = 10.seconds,
         )
-        conn.handshake(user, password, db)
-        return conn
+            .assertNext { assertIs<ValidationResult.Valid>(it) }
+            .completesNormally()
     }
 
     @Test
-    fun `scram-sha-256 auth succeeds`() = runBlocking {
-        withTimeout(10_000) {
-            val conn = connect("test", "testpass")
-            assertEquals(ConnectionState.Idle, conn.state)
-            conn.close()
-        }
+    fun `simple query returns rows`() {
+        Verify.that(
+            connect("test", "testpass").flatMapMany { connection ->
+                connection.query("SELECT 'hello' AS greeting UNION ALL SELECT 'world'").bind().multiple()
+                    .map { row -> row.get<String>("greeting") }
+            },
+            timeout = 10.seconds,
+        )
+            .emitsNext("hello", "world")
+            .completesNormally()
     }
 
     @Test
-    fun `md5 auth succeeds`() = runBlocking {
-        withTimeout(10_000) {
-            val conn = connect("testmd5", "testmd5pass")
-            assertEquals(ConnectionState.Idle, conn.state)
-            conn.close()
-        }
+    fun `parameterised query returns correct result`() {
+        Verify.that(
+            connect("test", "testpass").flatMapMany { connection ->
+                connection.query("SELECT :name::text AS name")
+                    .bind("name" to "minamoto")
+                    .multiple()
+                    .map { row -> row.get<String>("name") }
+            },
+            timeout = 10.seconds,
+        )
+            .emitsNext("minamoto")
+            .completesNormally()
     }
 
     @Test
-    fun `trust auth succeeds`() = runBlocking {
-        withTimeout(10_000) {
-            val conn = connect("testtrust", "")
-            assertEquals(ConnectionState.Idle, conn.state)
-            conn.close()
-        }
-    }
-
-    @Test
-    fun `ping returns valid after connect`() = runBlocking {
-        withTimeout(10_000) {
-            val conn = connect("test", "testpass")
-            assertIs<ValidationResult.Valid>(conn.ping())
-            conn.close()
-        }
-    }
-
-    @Test
-    fun `simple query returns rows`() = runBlocking {
-        withTimeout(10_000) {
-            val conn = connect("test", "testpass")
-            val rows = mutableListOf<String>()
-
-            conn.query("SELECT 'hello' AS greeting UNION ALL SELECT 'world'")
-                .toList().await().rightOrThrow()
-                .forEach { row -> rows += row.values.first()!!.toString(Charsets.UTF_8) }
-
-            assertEquals(listOf("hello", "world"), rows)
-            conn.close()
-        }
-    }
-
-    @Test
-    fun `parameterised query returns correct result`() = runBlocking {
-        withTimeout(10_000) {
-            val conn  = connect("test", "testpass")
-            val rows  = mutableListOf<String>()
-            val param = "minamoto".toByteArray(Charsets.UTF_8)
-
-            conn.query("SELECT \$1::text AS name", listOf(param))
-                .toList().await().rightOrThrow()
-                .forEach { row -> rows += row.values.first()!!.toString(Charsets.UTF_8) }
-
-            assertEquals(listOf("minamoto"), rows)
-            conn.close()
-        }
-    }
-
-    @Test
-    fun `wrong password throws authentication failed`() = runBlocking {
-        withTimeout(10_000) {
-            try {
-                connect("test", "wrongpassword")
-                error("expected authentication failure")
-            } catch (e: se.oyabun.minamoto.MinamotoException.AuthenticationFailed) {
-                // expected
-            }
-        }
+    fun `wrong password throws authentication failed`() {
+        val error = Verify.that(connect("test", "wrongpassword"), timeout = 10.seconds)
+            .completesWithError()
+        assertIs<MinamotoException.AuthenticationFailed>(error)
     }
 }

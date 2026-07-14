@@ -16,6 +16,8 @@
 package se.oyabun.minamoto.postgres.protocol
 
 import io.netty.buffer.Unpooled
+import se.oyabun.minamoto.postgres.protocol.Authentication
+import se.oyabun.minamoto.postgres.protocol.TransactionStatus
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -105,7 +107,7 @@ class MessageDecoderTest {
     fun `decodes AuthenticationOk`() {
         val buffer  = buildMessage('R', byteArrayOf(0, 0, 0, 0))
         val message = MessageDecoder.decode(buffer)
-        assertIs<BackendMessage.AuthenticationOk>(message)
+        assertIs<Authentication.Ok>(message)
         buffer.release()
     }
 
@@ -113,7 +115,7 @@ class MessageDecoderTest {
     fun `decodes AuthenticationMD5Password with salt`() {
         val salt   = byteArrayOf(1, 2, 3, 4)
         val buffer = buildMessage('R', byteArrayOf(0, 0, 0, 5) + salt)
-        val message = MessageDecoder.decode(buffer) as BackendMessage.AuthenticationMD5Password
+        val message = MessageDecoder.decode(buffer) as Authentication.MD5Password
         assertEquals(salt.toList(), message.salt.toList())
         buffer.release()
     }

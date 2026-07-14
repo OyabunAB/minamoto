@@ -22,9 +22,17 @@ import se.oyabun.aelv.fold
 import se.oyabun.aelv.rightOrThrow
 import se.oyabun.minamoto.MinamotoException
 import se.oyabun.minamoto.postgres.Logging
-import se.oyabun.minamoto.postgres.PgConnection
-import se.oyabun.minamoto.postgres.protocol.BackendMessage.*
-import se.oyabun.minamoto.postgres.protocol.FrontendMessage.*
+import se.oyabun.minamoto.postgres.PostgresConnection
+import se.oyabun.minamoto.postgres.protocol.Authentication
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.KeyData
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ErrorResponse
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.ReadyForQuery
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Bind
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Parse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.PasswordMessage
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.SASLInitialResponse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.SASLResponse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.StartupMessage
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -34,47 +42,47 @@ import javax.crypto.spec.SecretKeySpec
 import javax.crypto.SecretKeyFactory
 
 /**
- * Drives the PGwire startup sequence on an established [PgConnection].
+ * Drives the PGwire startup sequence on an established [PostgresConnection].
  *
  * Supports MD5, cleartext, and SCRAM-SHA-256 authentication.
  * Throws [MinamotoException.AuthenticationFailed] on auth failure.
  * Throws [MinamotoException.InvalidState] on unexpected message types.
  */
-internal suspend fun PgConnection.handshake(
+internal suspend fun PostgresConnection.handshake(
     user:     String,
     password: String,
     database: String,
-): BackendKeyData {
-    val log = Logging.of<PgConnection>()
+): KeyData {
+    val log = Logging.of<PostgresConnection>()
     log.protocol.handshakeStarted(id)
 
     // Step 1 — send startup, wait for auth type
     val authMessage = exchange(
         messages  = listOf(StartupMessage(user, database)),
-        takeUntil = { it is AuthenticationOk || it is AuthenticationMD5Password ||
-                      it is AuthenticationCleartextPassword || it is AuthenticationSASL ||
+        takeUntil = { it is Authentication.Ok || it is Authentication.MD5Password ||
+                      it is Authentication.CleartextPassword || it is Authentication.SASL ||
                       it is ErrorResponse },
     ).first().rightOrThrow()
 
     // Step 2 — respond to auth challenge
     when (authMessage) {
-        is AuthenticationOk                -> log.protocol.authRequired(id, "none")
-        is AuthenticationCleartextPassword -> { log.protocol.authRequired(id, "cleartext"); sendPassword(password) }
-        is AuthenticationMD5Password       -> { log.protocol.authRequired(id, "md5"); sendPassword(md5Password(user, password, authMessage.salt)) }
-        is AuthenticationSASL              -> { log.protocol.authRequired(id, "scram-sha-256"); performScram(user, password, authMessage) }
+        is Authentication.Ok                -> log.protocol.authRequired(id, "none")
+        is Authentication.CleartextPassword -> { log.protocol.authRequired(id, "cleartext"); sendPassword(password) }
+        is Authentication.MD5Password       -> { log.protocol.authRequired(id, "md5"); sendPassword(md5Password(user, password, authMessage.salt)) }
+        is Authentication.SASL              -> { log.protocol.authRequired(id, "scram-sha-256"); performScram(user, password, authMessage) }
         is ErrorResponse                   -> throw MinamotoException.AuthenticationFailed(authMessage.message)
         else -> throw MinamotoException.InvalidState("unexpected message during auth: $authMessage")
     }
 
-    // Step 3 — consume server params until ReadyForQuery, extract BackendKeyData
-    data class HandshakeState(val backendKeyData: BackendKeyData? = null)
+    // Step 3 — consume server params until ReadyForQuery, extract KeyData
+    data class HandshakeState(val backendKeyData: KeyData? = null)
 
     val state = exchange(
         messages  = emptyList(),
         takeUntil = { it is ReadyForQuery },
     ).fold(HandshakeState()) { acc, message ->
         when (message) {
-            is BackendKeyData -> acc.copy(backendKeyData = message)
+            is KeyData -> acc.copy(backendKeyData = message)
             is ErrorResponse  -> throw MinamotoException.AuthenticationFailed(message.message)
             else              -> acc
         }
@@ -82,13 +90,13 @@ internal suspend fun PgConnection.handshake(
 
     log.protocol.handshakeComplete(id)
     return state.backendKeyData
-        ?: throw MinamotoException.InvalidState("server did not send BackendKeyData")
+        ?: throw MinamotoException.InvalidState("server did not send KeyData")
 }
 
-private suspend fun PgConnection.performScram(
+private suspend fun PostgresConnection.performScram(
     user:     String,
     password: String,
-    message:  AuthenticationSASL,
+    message:  Authentication.SASL,
 ) {
     val mechanism = message.mechanisms.firstOrNull { it == SCRAM_SHA_256 }
         ?: throw MinamotoException.AuthenticationFailed("server does not support $SCRAM_SHA_256, offered: ${message.mechanisms}")
@@ -100,10 +108,10 @@ private suspend fun PgConnection.performScram(
 
     exchange(
         messages  = listOf(SASLInitialResponse(mechanism, clientFirst.toByteArray(Charsets.UTF_8))),
-        takeUntil = { it is AuthenticationSASLContinue || it is ErrorResponse },
+        takeUntil = { it is Authentication.SASLContinue || it is ErrorResponse },
     ).first().rightOrThrow().let { response ->
         if (response is ErrorResponse) throw MinamotoException.AuthenticationFailed(response.message)
-        val serverFirst = (response as AuthenticationSASLContinue).data.toString(Charsets.UTF_8)
+        val serverFirst = (response as Authentication.SASLContinue).data.toString(Charsets.UTF_8)
 
         // Parse server-first: r=<nonce>,s=<salt>,i=<iterations>
         val params       = serverFirst.split(",").associate { it.substringBefore('=') to it.substringAfter('=') }
@@ -132,11 +140,11 @@ private suspend fun PgConnection.performScram(
 
         exchange(
             messages  = listOf(SASLResponse(clientFinal.toByteArray(Charsets.UTF_8))),
-            takeUntil = { it is AuthenticationSASLFinal || it is AuthenticationOk || it is ErrorResponse },
+            takeUntil = { it is Authentication.SASLFinal || it is Authentication.Ok || it is ErrorResponse },
         ).first().rightOrThrow().let { finalResponse ->
             when (finalResponse) {
                 is ErrorResponse          -> throw MinamotoException.AuthenticationFailed(finalResponse.message)
-                is AuthenticationSASLFinal -> {
+                is Authentication.SASLFinal -> {
                     // Verify server signature
                     val serverParams = finalResponse.data.toString(Charsets.UTF_8)
                         .split(",").associate { it.substringBefore('=') to it.substringAfter('=') }
@@ -152,10 +160,10 @@ private suspend fun PgConnection.performScram(
     }
 }
 
-private suspend fun PgConnection.sendPassword(password: String) {
+private suspend fun PostgresConnection.sendPassword(password: String) {
     exchange(
         messages  = listOf(PasswordMessage(password)),
-        takeUntil = { it is AuthenticationOk || it is ErrorResponse },
+        takeUntil = { it is Authentication.Ok || it is ErrorResponse },
     ).first().rightOrThrow().let { message ->
         if (message is ErrorResponse)
             throw MinamotoException.AuthenticationFailed(message.message)

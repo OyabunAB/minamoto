@@ -19,13 +19,13 @@ import org.slf4j.LoggerFactory
 import org.slf4j.Logger as Slf4jLogger
 import se.oyabun.minamoto.ConnectionId
 
-internal inline fun Slf4jLogger.trace(msg: () -> String) { if (isTraceEnabled) trace(msg()) }
-internal inline fun Slf4jLogger.debug(msg: () -> String) { if (isDebugEnabled) debug(msg()) }
-internal inline fun Slf4jLogger.warn(msg: () -> String)  { if (isWarnEnabled)  warn(msg())  }
-internal inline fun Slf4jLogger.warn(cause: Throwable, msg: () -> String) { if (isWarnEnabled) warn(msg(), cause) }
-internal inline fun Slf4jLogger.error(cause: Throwable, msg: () -> String) { if (isErrorEnabled) error(msg(), cause) }
+internal inline fun Slf4jLogger.trace(message: () -> String) { if (isTraceEnabled) trace(message()) }
+internal inline fun Slf4jLogger.debug(message: () -> String) { if (isDebugEnabled) debug(message()) }
+internal inline fun Slf4jLogger.warn(message: () -> String)  { if (isWarnEnabled)  warn(message())  }
+internal inline fun Slf4jLogger.warn(cause: Throwable, message: () -> String) { if (isWarnEnabled) warn(message(), cause) }
+internal inline fun Slf4jLogger.error(cause: Throwable, message: () -> String) { if (isErrorEnabled) error(message(), cause) }
 
-internal class PgLog(private val slf4j: Slf4jLogger) {
+internal class Log(private val slf4j: Slf4jLogger) {
 
     val connection = Connection()
     val protocol   = Protocol()
@@ -36,7 +36,7 @@ internal class PgLog(private val slf4j: Slf4jLogger) {
         fun closed(id: ConnectionId)                      = slf4j.debug { "connection closed [$id]" }
         fun closing(id: ConnectionId)                     = slf4j.debug { "connection closing [$id]" }
         fun error(id: ConnectionId, cause: Throwable)     = slf4j.error(cause) { "connection error [$id]" }
-        fun invalidState(id: ConnectionId, msg: String)   = slf4j.warn { "invalid state [$id]: $msg" }
+        fun invalidState(id: ConnectionId, text: String)   = slf4j.warn { "invalid state [$id]: $text" }
     }
 
     inner class Protocol {
@@ -50,7 +50,7 @@ internal class PgLog(private val slf4j: Slf4jLogger) {
         fun queryComplete(id: ConnectionId)               = slf4j.debug { "query complete [$id]" }
         fun conversationQueued(id: ConnectionId, size: Int) = slf4j.trace { "conversation queued [$id] queue=$size" }
         fun conversationComplete(id: ConnectionId)        = slf4j.trace { "conversation complete [$id]" }
-        fun noConversation(id: ConnectionId, msg: String) = slf4j.warn { "no active conversation [$id]: $msg" }
+        fun noConversation(id: ConnectionId, text: String) = slf4j.warn { "no active conversation [$id]: $text" }
     }
 
     inner class Pool {
@@ -61,5 +61,5 @@ internal class PgLog(private val slf4j: Slf4jLogger) {
 }
 
 internal object Logging {
-    inline fun <reified T : Any> of(): PgLog = PgLog(LoggerFactory.getLogger(T::class.java))
+    inline fun <reified T : Any> of(): Log = Log(LoggerFactory.getLogger(T::class.java))
 }

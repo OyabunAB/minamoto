@@ -15,13 +15,11 @@
  */
 package se.oyabun.minamoto.postgres.protocol
 
-/**
- * Messages sent from the client to the server (frontend messages).
- *
- * Each type maps directly to a PGwire frontend message type.
- * See: https://www.postgresql.org/docs/current/protocol-message-formats.html
- */
-sealed interface FrontendMessage {
+import se.oyabun.minamoto.postgres.Column
+import se.oyabun.minamoto.postgres.Parameter
+import se.oyabun.minamoto.postgres.Parameters
+
+internal sealed interface FrontendMessage {
 
     /** Initiates a connection. Sent once before authentication. */
     data class StartupMessage(
@@ -50,13 +48,11 @@ sealed interface FrontendMessage {
     data class Bind(
         val portalName:    String,
         val statementName: String,
-        val parameters:    List<ByteArray?>,
+        val parameters:    Parameters,
         val resultFormats: List<Short> = emptyList(),
     ) : FrontendMessage
 
-    /**
-     * Requests a description of a prepared statement or portal.
-     */
+    /** Requests a description of a prepared statement or portal. */
     data class Describe(
         val target: DescribeTarget,
         val name:   String,
@@ -94,7 +90,7 @@ sealed interface FrontendMessage {
 
     /** SCRAM initial response — mechanism name + client-first message. */
     data class SASLInitialResponse(
-        val mechanism:        String,
+        val mechanism:          String,
         val clientFirstMessage: ByteArray,
     ) : FrontendMessage
 
@@ -102,7 +98,7 @@ sealed interface FrontendMessage {
     data class SASLResponse(val data: ByteArray) : FrontendMessage
 }
 
-sealed interface DescribeTarget {
+internal sealed interface DescribeTarget {
     data object Statement : DescribeTarget
     data object Portal    : DescribeTarget
 }
@@ -112,34 +108,11 @@ sealed interface DescribeTarget {
  *
  * Each type maps directly to a PGwire backend message type.
  */
-sealed interface BackendMessage {
+internal sealed interface BackendMessage {
 
-    /** Authentication succeeded — connection is ready to use. */
-    data object AuthenticationOk : BackendMessage
-
-    /** Server requests SCRAM authentication. [mechanisms] lists supported SCRAM variants. */
-    data class AuthenticationSASL(val mechanisms: List<String>) : BackendMessage
-
-    /** Server sends the SCRAM server-first message. */
-    data class AuthenticationSASLContinue(val data: ByteArray) : BackendMessage
-
-    /** Server sends the SCRAM server-final message for verification. */
-    data class AuthenticationSASLFinal(val data: ByteArray) : BackendMessage
-
-    /** Server requests a cleartext password. */
-    data object AuthenticationCleartextPassword : BackendMessage
-
-    /**
-     * Server requests an MD5-hashed password.
-     * Hash as: md5(md5(password + username) + salt), prefixed with "md5".
-     */
-    data class AuthenticationMD5Password(val salt: ByteArray) : BackendMessage
-
-    /** Server reports a runtime parameter value (e.g. server_version, TimeZone). */
     data class ParameterStatus(val name: String, val value: String) : BackendMessage
 
-    /** Server reports its process ID and secret key, used for cancel requests. */
-    data class BackendKeyData(val processId: Int, val secretKey: Int) : BackendMessage
+    data class KeyData(val processId: Int, val secretKey: Int) : BackendMessage
 
     /**
      * Server is ready to accept a new query.
@@ -149,44 +122,30 @@ sealed interface BackendMessage {
      */
     data class ReadyForQuery(val transactionStatus: TransactionStatus) : BackendMessage
 
-    /** Describes the parameters of a prepared statement. */
     data class ParameterDescription(val parameterOids: List<Int>) : BackendMessage
 
-    /** Describes the columns of a query result. */
-    data class RowDescription(val columns: List<ColumnDescription>) : BackendMessage
+    data class RowDescription(val columns: List<Column.Description>) : BackendMessage
 
-    /** A single data row from a query result. Each element is a raw column value or null. */
     data class DataRow(val values: List<ByteArray?>) : BackendMessage
 
-    /** Query completed successfully. [tag] is the command tag (e.g. "INSERT 0 1"). */
     data class CommandComplete(val tag: String) : BackendMessage
 
-    /** Parse completed successfully. */
     data object ParseComplete : BackendMessage
 
-    /** Bind completed successfully. */
     data object BindComplete : BackendMessage
 
-    /** Close completed successfully. */
     data object CloseComplete : BackendMessage
 
-    /** Portal suspended — more rows are available, request more via Execute. */
     data object PortalSuspended : BackendMessage
 
-    /** No data to return (e.g. Describe of a statement that returns no rows). */
     data object NoData : BackendMessage
 
-    /** Empty query string received. */
     data object EmptyQueryResponse : BackendMessage
 
     /**
-     * Server reported an error.
-     *
      * [severity] — ERROR, FATAL, or PANIC.
      * [sqlState] — 5-character SQLSTATE code.
-     * [message]  — primary human-readable message.
-     * [detail]   — optional additional detail.
-     * [hint]     — optional hint for the user.
+     * [detail] and [hint] carry the optional extended fields from the server error response.
      */
     data class ErrorResponse(
         val severity: String,
@@ -196,7 +155,6 @@ sealed interface BackendMessage {
         val hint:     String = "",
     ) : BackendMessage
 
-    /** Server sent a non-fatal notice. Same fields as [ErrorResponse]. */
     data class NoticeResponse(
         val severity: String,
         val sqlState: String,
@@ -205,7 +163,6 @@ sealed interface BackendMessage {
         val hint:     String = "",
     ) : BackendMessage
 
-    /** Async notification from LISTEN/NOTIFY. */
     data class NotificationResponse(
         val processId: Int,
         val channel:   String,
@@ -213,27 +170,22 @@ sealed interface BackendMessage {
     ) : BackendMessage
 }
 
-/**
- * The transaction state reported by the server in [BackendMessage.ReadyForQuery].
- */
-sealed interface TransactionStatus {
-    /** No transaction is active. */
+internal sealed interface TransactionStatus {
     data object Idle              : TransactionStatus
-    /** A transaction is in progress. */
     data object InTransaction     : TransactionStatus
-    /** A transaction is in a failed state — must be rolled back. */
+    /** A transaction is in a failed state — must be rolled back before further use. */
     data object FailedTransaction : TransactionStatus
 }
 
 /**
- * Metadata for a single column in a result set, as reported by [BackendMessage.RowDescription].
+ * Authentication result from the server. Subclasses represent each authentication
+ * mechanism the server may request or confirm.
  */
-data class ColumnDescription(
-    val name:         String,
-    val tableOid:     Int,
-    val columnIndex:  Short,
-    val typeOid:      Int,
-    val typeSize:     Short,
-    val typeModifier: Int,
-    val formatCode:   Short,
-)
+internal sealed class Authentication : BackendMessage {
+    data object Ok                                  : Authentication()
+    data object CleartextPassword                  : Authentication()
+    data class  MD5Password(val salt: ByteArray)   : Authentication()
+    data class  SASL(val mechanisms: List<String>) : Authentication()
+    data class  SASLContinue(val data: ByteArray)  : Authentication()
+    data class  SASLFinal(val data: ByteArray)     : Authentication()
+}

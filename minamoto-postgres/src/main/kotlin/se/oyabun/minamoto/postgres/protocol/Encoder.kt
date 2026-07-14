@@ -17,7 +17,20 @@ package se.oyabun.minamoto.postgres.protocol
 
 import io.netty.buffer.ByteBuf
 import io.netty.buffer.ByteBufAllocator
-import se.oyabun.minamoto.postgres.protocol.FrontendMessage.*
+import se.oyabun.minamoto.postgres.Parameter
+import se.oyabun.minamoto.postgres.Parameters
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Bind
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.CancelRequest
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Close
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Describe
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Execute
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Parse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.PasswordMessage
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.SASLInitialResponse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.SASLResponse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.StartupMessage
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Sync
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Terminate
 
 /**
  * Encodes [FrontendMessage]s into PGwire-format [ByteBuf]s.
@@ -30,104 +43,94 @@ import se.oyabun.minamoto.postgres.protocol.FrontendMessage.*
 internal object MessageEncoder {
 
     fun encode(message: FrontendMessage, allocator: ByteBufAllocator): ByteBuf = when (message) {
-        is StartupMessage  -> encodeStartup(message, allocator)
-        is PasswordMessage -> encodeSingleMessage('p', allocator) { writeCString(message.password) }
-        is Parse           -> encodeSingleMessage('P', allocator) {
+        is StartupMessage      -> encodeStartup(message, allocator)
+        is PasswordMessage     -> encodeSingleMessage('p', allocator) { writeCString(message.password) }
+        is Parse               -> encodeSingleMessage('P', allocator) {
             writeCString(message.statementName)
             writeCString(message.sql)
             writeShort(message.parameterOids.size)
             message.parameterOids.forEach { writeInt(it) }
         }
-        is Bind            -> encodeSingleMessage('B', allocator) {
+        is Bind                -> encodeSingleMessage('B', allocator) {
             writeCString(message.portalName)
             writeCString(message.statementName)
-            writeShort(0) // all parameters use default (text) format
+            val formats = message.parameters.map { param ->
+                if (param is Parameter.Defined) param.format.wire.toInt() else 0
+            }
+            writeShort(formats.size)
+            formats.forEach { writeShort(it) }
             writeShort(message.parameters.size)
-            message.parameters.forEach { param ->
-                if (param == null) {
-                    writeInt(-1)
-                } else {
-                    writeInt(param.size)
-                    writeBytes(param)
+            message.parameters.forEach { parameter ->
+                when (parameter) {
+                    is Parameter.Undefined -> writeInt(-1)
+                    is Parameter.Defined   -> { writeInt(parameter.bytes.size); writeBytes(parameter.bytes) }
                 }
             }
             writeShort(message.resultFormats.size)
             message.resultFormats.forEach { writeShort(it.toInt()) }
         }
-        is Describe        -> encodeSingleMessage('D', allocator) {
+        is Describe            -> encodeSingleMessage('D', allocator) {
             writeByte(if (message.target is DescribeTarget.Statement) 'S'.code else 'P'.code)
             writeCString(message.name)
         }
-        is Execute         -> encodeSingleMessage('E', allocator) {
+        is Execute             -> encodeSingleMessage('E', allocator) {
             writeCString(message.portalName)
             writeInt(message.maxRows)
         }
-        is Close           -> encodeSingleMessage('C', allocator) {
+        is Close               -> encodeSingleMessage('C', allocator) {
             writeByte(if (message.target is DescribeTarget.Statement) 'S'.code else 'P'.code)
             writeCString(message.name)
         }
-        is Sync            -> encodeSingleMessage('S', allocator) {}
-        is Terminate       -> encodeSingleMessage('X', allocator) {}
-        is CancelRequest   -> encodeCancelRequest(message, allocator)
+        is Sync                -> encodeSingleMessage('S', allocator) {}
+        is Terminate           -> encodeSingleMessage('X', allocator) {}
+        is CancelRequest       -> encodeCancelRequest(message, allocator)
         is SASLInitialResponse -> encodeSingleMessage('p', allocator) {
             writeCString(message.mechanism)
             writeInt(message.clientFirstMessage.size)
             writeBytes(message.clientFirstMessage)
         }
-        is SASLResponse    -> encodeSingleMessage('p', allocator) {
+        is SASLResponse        -> encodeSingleMessage('p', allocator) {
             writeBytes(message.data)
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Startup — no message type byte, protocol version instead
-    // ---------------------------------------------------------------------------
-
     private fun encodeStartup(message: StartupMessage, allocator: ByteBufAllocator): ByteBuf {
-        val buf = allocator.buffer()
-        val start = buf.writerIndex()
-        buf.writeInt(0) // length placeholder
-        buf.writeInt(PROTOCOL_VERSION)
-        buf.writeCString("user")
-        buf.writeCString(message.user)
-        buf.writeCString("database")
-        buf.writeCString(message.database)
-        buf.writeCString("application_name")
-        buf.writeCString(message.applicationName)
-        buf.writeByte(0) // trailing null terminator
-        buf.setInt(start, buf.writerIndex() - start)
-        return buf
+        val buffer     = allocator.buffer()
+        val startIndex = buffer.writerIndex()
+        buffer.writeInt(0) // length placeholder
+        buffer.writeInt(PROTOCOL_VERSION)
+        buffer.writeCString("user")
+        buffer.writeCString(message.user)
+        buffer.writeCString("database")
+        buffer.writeCString(message.database)
+        buffer.writeCString("application_name")
+        buffer.writeCString(message.applicationName)
+        buffer.writeByte(0)
+        buffer.setInt(startIndex, buffer.writerIndex() - startIndex)
+        return buffer
     }
-
-    // ---------------------------------------------------------------------------
-    // Cancel request — separate connection, no type byte, fixed format
-    // ---------------------------------------------------------------------------
 
     private fun encodeCancelRequest(message: CancelRequest, allocator: ByteBufAllocator): ByteBuf {
-        val buf = allocator.buffer(16)
-        buf.writeInt(16)
-        buf.writeInt(CANCEL_REQUEST_CODE)
-        buf.writeInt(message.processId)
-        buf.writeInt(message.secretKey)
-        return buf
+        val buffer = allocator.buffer(16)
+        buffer.writeInt(16)
+        buffer.writeInt(CANCEL_REQUEST_CODE)
+        buffer.writeInt(message.processId)
+        buffer.writeInt(message.secretKey)
+        return buffer
     }
-
-    // ---------------------------------------------------------------------------
-    // Standard message — type byte + int32 length + body
-    // ---------------------------------------------------------------------------
 
     private fun encodeSingleMessage(
         type:      Char,
         allocator: ByteBufAllocator,
         body:      ByteBuf.() -> Unit,
     ): ByteBuf {
-        val buf = allocator.buffer()
-        buf.writeByte(type.code)
-        val lengthIndex = buf.writerIndex()
-        buf.writeInt(0) // length placeholder
-        buf.body()
-        buf.setInt(lengthIndex, buf.writerIndex() - lengthIndex)
-        return buf
+        val buffer      = allocator.buffer()
+        buffer.writeByte(type.code)
+        val lengthIndex = buffer.writerIndex()
+        buffer.writeInt(0) // length placeholder
+        buffer.body()
+        buffer.setInt(lengthIndex, buffer.writerIndex() - lengthIndex)
+        return buffer
     }
 
     private fun ByteBuf.writeCString(value: String) {
@@ -135,6 +138,6 @@ internal object MessageEncoder {
         writeByte(0)
     }
 
-    private const val PROTOCOL_VERSION   = 196608  // 3.0
+    private const val PROTOCOL_VERSION    = 196608   // 3.0
     private const val CANCEL_REQUEST_CODE = 80877102
 }

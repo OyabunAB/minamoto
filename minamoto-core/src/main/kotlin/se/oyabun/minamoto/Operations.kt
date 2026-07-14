@@ -18,6 +18,7 @@ package se.oyabun.minamoto
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
+import kotlin.reflect.KClass
 
 /**
  * A single result row from a query.
@@ -29,8 +30,8 @@ import se.oyabun.aelv.One
  * type throws [MinamotoException.CodecFailed].
  */
 interface Row {
-    fun <T : Any> get(column: String): T
-    fun <T : Any> getOrNull(column: String): T?
+    fun <T : Any> get(column: String, type: KClass<T>): T
+    fun <T : Any> getOrNull(column: String, type: KClass<T>): T?
     val metadata: RowMetadata
 }
 

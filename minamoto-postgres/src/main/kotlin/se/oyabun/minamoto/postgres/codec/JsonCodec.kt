@@ -27,7 +27,7 @@ import kotlin.reflect.KType
  * [sourceOid] == [Oid.JSONB]: binary jsonb prepends a version byte (always 0x01) before
  * the JSON text. This codec strips it on decode and prepends it on encode.
  *
- * The [Json] instance is supplied by [PgCodecRegistry] and shared across all JSON codecs
+ * The [Json] instance is supplied by [CodecRegistry] and shared across all JSON codecs
  * registered for a given pool — configure it there to add custom serializers or modules.
  */
 internal class JsonCodec<T : Any>(

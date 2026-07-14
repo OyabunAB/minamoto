@@ -6,9 +6,9 @@ reactive_streams  = "1.0.4"
 r2dbc_spi         = "1.0.0.RELEASE"
 slf4j             = "2.0.18"
 logback           = "1.5.18"
-aelv              = "1.0.0-rc.3"
+aelv              = "0.0.0-SNAPSHOT"
 aelv_netty        = "0.0.0-SNAPSHOT"
-testcontainers    = "1.20.4"
+testcontainers    = "2.0.5"
 
 [libraries]
 reactive_streams          = { group = "org.reactivestreams",   name = "reactive-streams",                  version.ref = "reactive_streams" }
@@ -21,9 +21,9 @@ kotlin_test_junit5        = { group = "org.jetbrains.kotlin",  name = "kotlin-te
 coroutines_test           = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test",           version.ref = "coroutines" }
 aelv                      = { group = "se.oyabun",             name = "aelv",                              version.ref = "aelv" }
 aelv_netty                = { group = "se.oyabun",             name = "aelv-netty",                        version.ref = "aelv_netty" }
-testcontainers_core       = { group = "org.testcontainers",    name = "testcontainers",                    version.ref = "testcontainers" }
-testcontainers_postgresql = { group = "org.testcontainers",    name = "postgresql",                        version.ref = "testcontainers" }
-testcontainers_junit5     = { group = "org.testcontainers",    name = "junit-jupiter",                     version.ref = "testcontainers" }
+testcontainers_core       = { group = "org.testcontainers",    name = "testcontainers",                              version.ref = "testcontainers" }
+testcontainers_postgresql = { group = "org.testcontainers",    name = "testcontainers-postgresql",                   version.ref = "testcontainers" }
+testcontainers_junit5     = { group = "org.testcontainers",    name = "testcontainers-junit-jupiter",                version.ref = "testcontainers" }
 
 [bundles]
 core_api          = ["reactive_streams", "r2dbc_spi"]

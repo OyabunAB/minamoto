@@ -91,6 +91,15 @@ sealed interface FrontendMessage {
 
     /** Terminates the connection gracefully. */
     data object Terminate : FrontendMessage
+
+    /** SCRAM initial response — mechanism name + client-first message. */
+    data class SASLInitialResponse(
+        val mechanism:        String,
+        val clientFirstMessage: ByteArray,
+    ) : FrontendMessage
+
+    /** SCRAM client-final message. */
+    data class SASLResponse(val data: ByteArray) : FrontendMessage
 }
 
 sealed interface DescribeTarget {
@@ -107,6 +116,15 @@ sealed interface BackendMessage {
 
     /** Authentication succeeded — connection is ready to use. */
     data object AuthenticationOk : BackendMessage
+
+    /** Server requests SCRAM authentication. [mechanisms] lists supported SCRAM variants. */
+    data class AuthenticationSASL(val mechanisms: List<String>) : BackendMessage
+
+    /** Server sends the SCRAM server-first message. */
+    data class AuthenticationSASLContinue(val data: ByteArray) : BackendMessage
+
+    /** Server sends the SCRAM server-final message for verification. */
+    data class AuthenticationSASLFinal(val data: ByteArray) : BackendMessage
 
     /** Server requests a cleartext password. */
     data object AuthenticationCleartextPassword : BackendMessage

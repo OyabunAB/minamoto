@@ -1,0 +1,65 @@
+/*
+ * Copyright 2026 Oyabun AB
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package se.oyabun.minamoto.postgres
+
+import org.slf4j.LoggerFactory
+import org.slf4j.Logger as Slf4jLogger
+import se.oyabun.minamoto.ConnectionId
+
+internal inline fun Slf4jLogger.trace(msg: () -> String) { if (isTraceEnabled) trace(msg()) }
+internal inline fun Slf4jLogger.debug(msg: () -> String) { if (isDebugEnabled) debug(msg()) }
+internal inline fun Slf4jLogger.warn(msg: () -> String)  { if (isWarnEnabled)  warn(msg())  }
+internal inline fun Slf4jLogger.warn(cause: Throwable, msg: () -> String) { if (isWarnEnabled) warn(msg(), cause) }
+internal inline fun Slf4jLogger.error(cause: Throwable, msg: () -> String) { if (isErrorEnabled) error(msg(), cause) }
+
+internal class PgLog(private val slf4j: Slf4jLogger) {
+
+    val connection = Connection()
+    val protocol   = Protocol()
+    val pool       = Pool()
+
+    inner class Connection {
+        fun created(id: ConnectionId)                     = slf4j.debug { "connection created [$id]" }
+        fun closed(id: ConnectionId)                      = slf4j.debug { "connection closed [$id]" }
+        fun closing(id: ConnectionId)                     = slf4j.debug { "connection closing [$id]" }
+        fun error(id: ConnectionId, cause: Throwable)     = slf4j.error(cause) { "connection error [$id]" }
+        fun invalidState(id: ConnectionId, msg: String)   = slf4j.warn { "invalid state [$id]: $msg" }
+    }
+
+    inner class Protocol {
+        fun handshakeStarted(id: ConnectionId)            = slf4j.debug { "handshake started [$id]" }
+        fun handshakeComplete(id: ConnectionId)           = slf4j.debug { "handshake complete [$id]" }
+        fun authRequired(id: ConnectionId, type: String)  = slf4j.debug { "auth required [$id]: $type" }
+        fun messageReceived(id: ConnectionId, type: String) = slf4j.trace { "← [$id] $type" }
+        fun messageSent(id: ConnectionId, type: String)   = slf4j.trace { "→ [$id] $type" }
+        fun queryStarted(id: ConnectionId, sql: String)   = slf4j.debug { "query [$id]: ${sql.take(120)}" }
+        fun rowReceived(id: ConnectionId)                 = slf4j.trace { "row [$id]" }
+        fun queryComplete(id: ConnectionId)               = slf4j.debug { "query complete [$id]" }
+        fun conversationQueued(id: ConnectionId, size: Int) = slf4j.trace { "conversation queued [$id] queue=$size" }
+        fun conversationComplete(id: ConnectionId)        = slf4j.trace { "conversation complete [$id]" }
+        fun noConversation(id: ConnectionId, msg: String) = slf4j.warn { "no active conversation [$id]: $msg" }
+    }
+
+    inner class Pool {
+        fun acquired(id: ConnectionId)                    = slf4j.debug { "acquired [$id]" }
+        fun released(id: ConnectionId)                    = slf4j.debug { "released [$id]" }
+        fun invalidated(id: ConnectionId, reason: String) = slf4j.warn { "invalidated [$id]: $reason" }
+    }
+}
+
+internal object Logging {
+    inline fun <reified T : Any> of(): PgLog = PgLog(LoggerFactory.getLogger(T::class.java))
+}

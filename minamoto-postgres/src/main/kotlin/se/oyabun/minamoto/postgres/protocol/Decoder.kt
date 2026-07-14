@@ -59,6 +59,26 @@ internal object MessageDecoder {
         0    -> AuthenticationOk
         3    -> AuthenticationCleartextPassword
         5    -> AuthenticationMD5Password(ByteArray(4).also { buf.readBytes(it) })
+        10   -> {
+            // AuthenticationSASL — list of mechanism names, null-terminated, double-null at end
+            val mechanisms = mutableListOf<String>()
+            while (buf.isReadable) {
+                val name = buf.readCString()
+                if (name.isEmpty()) break
+                mechanisms.add(name)
+            }
+            AuthenticationSASL(mechanisms)
+        }
+        11   -> {
+            val data = ByteArray(buf.readableBytes())
+            buf.readBytes(data)
+            AuthenticationSASLContinue(data)
+        }
+        12   -> {
+            val data = ByteArray(buf.readableBytes())
+            buf.readBytes(data)
+            AuthenticationSASLFinal(data)
+        }
         else -> throw MinamotoException.InvalidState("unsupported authentication type: $subtype")
     }
 

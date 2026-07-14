@@ -69,6 +69,14 @@ internal object MessageEncoder {
         is Sync            -> encodeSingleMessage('S', allocator) {}
         is Terminate       -> encodeSingleMessage('X', allocator) {}
         is CancelRequest   -> encodeCancelRequest(message, allocator)
+        is SASLInitialResponse -> encodeSingleMessage('p', allocator) {
+            writeCString(message.mechanism)
+            writeInt(message.clientFirstMessage.size)
+            writeBytes(message.clientFirstMessage)
+        }
+        is SASLResponse    -> encodeSingleMessage('p', allocator) {
+            writeBytes(message.data)
+        }
     }
 
     // ---------------------------------------------------------------------------

@@ -18,42 +18,36 @@ package se.oyabun.minamoto.postgres.protocol
 import io.netty.buffer.ByteBuf
 import io.netty.buffer.ByteBufAllocator
 import io.netty.buffer.CompositeByteBuf
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 import se.oyabun.aelv.Many
+import se.oyabun.aelv.concatMap
+import se.oyabun.aelv.scan
 
 /**
  * Splits a raw inbound byte stream into complete PGwire backend messages.
  *
- * PGwire message framing: 1 byte type + 4 byte length (includes itself, excludes type byte).
- * Accumulates incoming [ByteBuf]s until a complete message is available, then emits it.
+ * PGwire framing: 1 byte type + 4 byte int32 length (includes itself, excludes type byte).
+ *
+ * Uses [scan] to accumulate incoming [ByteBuf] chunks into a [CompositeByteBuf], emitting
+ * a list of complete messages whenever enough bytes are available. Downstream receives
+ * each complete message buffer individually via [flatMap].
  *
  * Each emitted [ByteBuf] is a complete, self-contained message. The caller is responsible
  * for releasing it after decoding.
  */
 internal fun Many<ByteBuf>.framed(allocator: ByteBufAllocator): Many<ByteBuf> =
-    Many.from(framedFlow(allocator))
-
-private fun Many<ByteBuf>.framedFlow(allocator: ByteBufAllocator): Flow<ByteBuf> = flow {
-    val accumulator: CompositeByteBuf = allocator.compositeBuffer()
-    try {
-        asFlow().collect { chunk ->
-            accumulator.addComponent(true, chunk)
-            while (true) {
-                // Need at least 5 bytes to read type + length
-                if (accumulator.readableBytes() < 5) break
-
-                val length = accumulator.getInt(accumulator.readerIndex() + 1)
-                val total  = 1 + length // type byte + length field + body
-
-                if (accumulator.readableBytes() < total) break
-
-                val message = allocator.buffer(total)
-                accumulator.readBytes(message, total)
-                emit(message)
-            }
-        }
-    } finally {
-        accumulator.release()
+    scan(allocator.compositeBuffer() as CompositeByteBuf) { acc: CompositeByteBuf, chunk: ByteBuf ->
+        acc.addComponent(true, chunk)
+        acc
     }
-}
+    .concatMap { acc: CompositeByteBuf ->
+        val messages = mutableListOf<ByteBuf>()
+        while (acc.readableBytes() >= 5) {
+            val length = acc.getInt(acc.readerIndex() + 1)
+            val total  = 1 + length
+            if (acc.readableBytes() < total) break
+            val message = allocator.buffer(total)
+            acc.readBytes(message, total)
+            messages.add(message)
+        }
+        Many.items(*messages.toTypedArray())
+    }

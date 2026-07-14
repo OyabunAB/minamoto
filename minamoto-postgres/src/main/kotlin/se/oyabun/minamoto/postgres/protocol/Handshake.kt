@@ -15,87 +15,188 @@
  */
 package se.oyabun.minamoto.postgres.protocol
 
-import io.netty.buffer.ByteBufAllocator
-import io.netty.channel.Channel
-import kotlinx.coroutines.flow.first
-import se.oyabun.aelv.netty.inbound
-import se.oyabun.aelv.netty.write
+import se.oyabun.aelv.await
+import se.oyabun.aelv.discard
+import se.oyabun.aelv.first
+import se.oyabun.aelv.fold
+import se.oyabun.aelv.rightOrThrow
 import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.postgres.Logging
+import se.oyabun.minamoto.postgres.PgConnection
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.*
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.*
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
+import javax.crypto.Mac
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
+import javax.crypto.SecretKeyFactory
 
 /**
- * Drives the PGwire startup sequence on an established TCP [Channel].
+ * Drives the PGwire startup sequence on an established [PgConnection].
  *
- * Sends [StartupMessage], handles authentication ([AuthenticationOk],
- * [AuthenticationMD5Password], [AuthenticationCleartextPassword]), consumes
- * [ParameterStatus] and [BackendKeyData], and returns when [ReadyForQuery] is received.
- *
+ * Supports MD5, cleartext, and SCRAM-SHA-256 authentication.
  * Throws [MinamotoException.AuthenticationFailed] on auth failure.
  * Throws [MinamotoException.InvalidState] on unexpected message types.
  */
-internal suspend fun Channel.handshake(
-    user:      String,
-    password:  String,
-    database:  String,
-    allocator: ByteBufAllocator = alloc(),
-): HandshakeResult {
-    val messages = inbound().framed(allocator)
-    var backendKeyData: BackendKeyData? = null
+internal suspend fun PgConnection.handshake(
+    user:     String,
+    password: String,
+    database: String,
+): BackendKeyData {
+    val log = Logging.of<PgConnection>()
+    log.protocol.handshakeStarted(id)
 
-    write(MessageEncoder.encode(StartupMessage(user, database), allocator)).await()
+    // Step 1 — send startup, wait for auth type
+    val authMessage = exchange(
+        messages  = listOf(StartupMessage(user, database)),
+        takeUntil = { it is AuthenticationOk || it is AuthenticationMD5Password ||
+                      it is AuthenticationCleartextPassword || it is AuthenticationSASL ||
+                      it is ErrorResponse },
+    ).first().rightOrThrow()
 
-    messages.asFlow().first { buf ->
-        try {
-            when (val message = MessageDecoder.decode(buf)) {
-                is AuthenticationOk                -> false
-                is AuthenticationCleartextPassword -> {
-                    write(MessageEncoder.encode(PasswordMessage(password), allocator)).await()
-                    false
-                }
-                is AuthenticationMD5Password       -> {
-                    val hashed = md5Password(user, password, message.salt)
-                    write(MessageEncoder.encode(PasswordMessage(hashed), allocator)).await()
-                    false
-                }
-                is ParameterStatus                 -> false
-                is BackendKeyData                  -> { backendKeyData = message; false }
-                is ReadyForQuery                   -> true
-                is ErrorResponse                   -> throw MinamotoException.AuthenticationFailed(message.message)
-                else -> throw MinamotoException.InvalidState("unexpected message during handshake: $message")
-            }
-        } finally {
-            buf.release()
-        }
+    // Step 2 — respond to auth challenge
+    when (authMessage) {
+        is AuthenticationOk                -> log.protocol.authRequired(id, "none")
+        is AuthenticationCleartextPassword -> { log.protocol.authRequired(id, "cleartext"); sendPassword(password) }
+        is AuthenticationMD5Password       -> { log.protocol.authRequired(id, "md5"); sendPassword(md5Password(user, password, authMessage.salt)) }
+        is AuthenticationSASL              -> { log.protocol.authRequired(id, "scram-sha-256"); performScram(user, password, authMessage) }
+        is ErrorResponse                   -> throw MinamotoException.AuthenticationFailed(authMessage.message)
+        else -> throw MinamotoException.InvalidState("unexpected message during auth: $authMessage")
     }
 
-    return HandshakeResult(
-        backendKeyData = backendKeyData
-            ?: throw MinamotoException.InvalidState("server did not send BackendKeyData"),
-    )
+    // Step 3 — consume server params until ReadyForQuery, extract BackendKeyData
+    data class HandshakeState(val backendKeyData: BackendKeyData? = null)
+
+    val state = exchange(
+        messages  = emptyList(),
+        takeUntil = { it is ReadyForQuery },
+    ).fold(HandshakeState()) { acc, message ->
+        when (message) {
+            is BackendKeyData -> acc.copy(backendKeyData = message)
+            is ErrorResponse  -> throw MinamotoException.AuthenticationFailed(message.message)
+            else              -> acc
+        }
+    }.await().rightOrThrow()
+
+    log.protocol.handshakeComplete(id)
+    return state.backendKeyData
+        ?: throw MinamotoException.InvalidState("server did not send BackendKeyData")
 }
 
-/**
- * The result of a completed handshake.
- *
- * [backendKeyData] carries the process ID and secret key needed to send cancel requests.
- */
-data class HandshakeResult(
-    val backendKeyData: BackendKeyData,
-)
+private suspend fun PgConnection.performScram(
+    user:     String,
+    password: String,
+    message:  AuthenticationSASL,
+) {
+    val mechanism = message.mechanisms.firstOrNull { it == SCRAM_SHA_256 }
+        ?: throw MinamotoException.AuthenticationFailed("server does not support $SCRAM_SHA_256, offered: ${message.mechanisms}")
 
-/**
- * Computes the MD5 password hash as required by PGwire.
- *
- * Format: "md5" + md5(md5(password + user) + salt)
- */
+    // Client-first message
+    val clientNonce     = generateNonce()
+    val clientFirstBare = "n=$user,r=$clientNonce"
+    val clientFirst     = "$GS2_HEADER$clientFirstBare"
+
+    exchange(
+        messages  = listOf(SASLInitialResponse(mechanism, clientFirst.toByteArray(Charsets.UTF_8))),
+        takeUntil = { it is AuthenticationSASLContinue || it is ErrorResponse },
+    ).first().rightOrThrow().let { response ->
+        if (response is ErrorResponse) throw MinamotoException.AuthenticationFailed(response.message)
+        val serverFirst = (response as AuthenticationSASLContinue).data.toString(Charsets.UTF_8)
+
+        // Parse server-first: r=<nonce>,s=<salt>,i=<iterations>
+        val params       = serverFirst.split(",").associate { it.substringBefore('=') to it.substringAfter('=') }
+        val serverNonce  = params["r"] ?: throw MinamotoException.AuthenticationFailed("missing nonce in server-first")
+        val salt         = Base64.getDecoder().decode(params["s"] ?: throw MinamotoException.AuthenticationFailed("missing salt"))
+        val iterations   = (params["i"] ?: throw MinamotoException.AuthenticationFailed("missing iterations")).toInt()
+
+        if (!serverNonce.startsWith(clientNonce))
+            throw MinamotoException.AuthenticationFailed("server nonce does not start with client nonce")
+
+        // Derive keys
+        val saltedPassword = pbkdf2(password, salt, iterations)
+        val clientKey      = hmacSha256(saltedPassword, CLIENT_KEY)
+        val storedKey      = sha256(clientKey)
+        val serverKey      = hmacSha256(saltedPassword, SERVER_KEY)
+
+        // Client-final
+        val channelBinding  = Base64.getEncoder().encodeToString(GS2_HEADER.toByteArray(Charsets.UTF_8))
+        val clientFinalWithoutProof = "c=$channelBinding,r=$serverNonce"
+        val authMessage2    = "$clientFirstBare,$serverFirst,$clientFinalWithoutProof"
+        val clientSignature = hmacSha256(storedKey, authMessage2)
+        val clientProof     = xorBytes(clientKey, clientSignature)
+        val serverSignature = hmacSha256(serverKey, authMessage2)
+
+        val clientFinal = "${clientFinalWithoutProof},p=${Base64.getEncoder().encodeToString(clientProof)}"
+
+        exchange(
+            messages  = listOf(SASLResponse(clientFinal.toByteArray(Charsets.UTF_8))),
+            takeUntil = { it is AuthenticationSASLFinal || it is AuthenticationOk || it is ErrorResponse },
+        ).first().rightOrThrow().let { finalResponse ->
+            when (finalResponse) {
+                is ErrorResponse          -> throw MinamotoException.AuthenticationFailed(finalResponse.message)
+                is AuthenticationSASLFinal -> {
+                    // Verify server signature
+                    val serverParams = finalResponse.data.toString(Charsets.UTF_8)
+                        .split(",").associate { it.substringBefore('=') to it.substringAfter('=') }
+                    val serverSigReceived = Base64.getDecoder().decode(
+                        serverParams["v"] ?: throw MinamotoException.AuthenticationFailed("missing server signature")
+                    )
+                    if (!serverSigReceived.contentEquals(serverSignature))
+                        throw MinamotoException.AuthenticationFailed("server signature verification failed")
+                }
+                else -> { /* AuthenticationOk or other — fine */ }
+            }
+        }
+    }
+}
+
+private suspend fun PgConnection.sendPassword(password: String) {
+    exchange(
+        messages  = listOf(PasswordMessage(password)),
+        takeUntil = { it is AuthenticationOk || it is ErrorResponse },
+    ).first().rightOrThrow().let { message ->
+        if (message is ErrorResponse)
+            throw MinamotoException.AuthenticationFailed(message.message)
+    }
+}
+
+private const val SCRAM_SHA_256          = "SCRAM-SHA-256"
+private const val HMAC_SHA256            = "HmacSHA256"
+private const val PBKDF2_HMAC_SHA256     = "PBKDF2WithHmacSHA256"
+private const val CLIENT_KEY             = "Client Key"
+private const val SERVER_KEY             = "Server Key"
+private const val GS2_HEADER            = "n,,"
+private const val SCRAM_SHA_256_KEY_BITS = 256  // SHA-256 output size — fixed for SCRAM-SHA-256
+
+private fun generateNonce(): String {
+    val bytes = ByteArray(24)
+    SecureRandom().nextBytes(bytes)
+    return Base64.getEncoder().encodeToString(bytes)
+}
+
+private fun pbkdf2(password: String, salt: ByteArray, iterations: Int): ByteArray {
+    val spec = PBEKeySpec(password.toCharArray(), salt, iterations, SCRAM_SHA_256_KEY_BITS)
+    return SecretKeyFactory.getInstance(PBKDF2_HMAC_SHA256).generateSecret(spec).encoded
+}
+
+private fun hmacSha256(key: ByteArray, data: String): ByteArray =
+    Mac.getInstance(HMAC_SHA256)
+        .also { it.init(SecretKeySpec(key, HMAC_SHA256)) }
+        .doFinal(data.toByteArray(Charsets.UTF_8))
+
+private fun sha256(data: ByteArray): ByteArray =
+    MessageDigest.getInstance("SHA-256").digest(data)
+
+private fun xorBytes(a: ByteArray, b: ByteArray): ByteArray =
+    ByteArray(a.size) { i -> (a[i].toInt() xor b[i].toInt()).toByte() }
+
 private fun md5Password(user: String, password: String, salt: ByteArray): String {
-    val md5 = MessageDigest.getInstance("MD5")
-    val inner = md5.digest((password + user).toByteArray(Charsets.UTF_8))
-    val innerHex = inner.toHex()
+    val md5   = MessageDigest.getInstance("MD5")
+    val inner = md5.digest((password + user).toByteArray(Charsets.UTF_8)).toHex()
     md5.reset()
-    val outer = md5.digest((innerHex + salt.toString(Charsets.ISO_8859_1)).toByteArray(Charsets.ISO_8859_1))
+    val outer = md5.digest((inner + salt.toString(Charsets.ISO_8859_1)).toByteArray(Charsets.ISO_8859_1))
     return "md5" + outer.toHex()
 }
 

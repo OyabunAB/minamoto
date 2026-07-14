@@ -1,20 +1,33 @@
 package se.oyabun.minamoto.postgres
 
-import org.junit.jupiter.api.Disabled
+import kotlinx.datetime.Instant
+import kotlinx.datetime.LocalDateTime
+import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.DynamicContainer.dynamicContainer
 import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
+import se.oyabun.aelv.One
+import se.oyabun.aelv.Verify
+import se.oyabun.aelv.await
+import se.oyabun.aelv.flatMapMany
+import se.oyabun.aelv.map
+import se.oyabun.aelv.netty.NettyTransport
+import se.oyabun.aelv.rightOrThrow
+import se.oyabun.aelv.toMaybe
+import se.oyabun.aelv.toMany
+import se.oyabun.minamoto.ConnectionId
+import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.postgres.codec.CodecRegistry
+import se.oyabun.minamoto.postgres.protocol.handshake
+import java.math.BigDecimal
+import java.util.UUID
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNull
+import kotlin.time.Duration.Companion.seconds
 
-/**
- * Tier 3 — array and JSON codec integration tests.
- *
- * Verifies 1D array round-trips, null element rejection, empty arrays, and
- * JSON/JSONB with kotlinx.serialization. Requires PgRow + codec wiring (Phase 1)
- * and the CodecRegistrar SPI path.
- */
-@Disabled("Requires PgRow + Bind format-code wiring — Phase 1")
 class ArrayAndJsonCodecIntegrationTest {
 
     companion object {
@@ -24,6 +37,42 @@ class ArrayAndJsonCodecIntegrationTest {
             "postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609",
             "postgres:18beta2-alpine@sha256:0164ef2cdce5fc6136d7de2cf9864bee88f593283608facace1e6460ba63ad0c",
         )
+
+        @Serializable
+        data class Payload(val id: Int, val name: String)
+    }
+
+    private fun connect(postgres: PostgreSQLContainer, registry: CodecRegistry = CodecRegistry()): One<PostgresDatabase> =
+        One.defer {
+            val transport          = NettyTransport()
+            val nettyConnection    = transport.connect(postgres.host, postgres.firstMappedPort).await().rightOrThrow()
+            val postgresConnection = PostgresConnection(
+                id         = ConnectionId(System.nanoTime()),
+                connection = nettyConnection,
+                transport  = transport,
+                registry   = registry,
+            )
+            postgresConnection.handshake(postgres.username, postgres.password, postgres.databaseName)
+            PostgresDatabase(postgresConnection)
+        }
+
+    private inline fun <reified T : Any> array(
+        postgres:  PostgreSQLContainer,
+        label:     String,
+        statement: String,
+        column:    String,
+        noinline assertion: (T) -> Unit,
+    ) = dynamicTest(label) {
+        val type = T::class
+        Verify.that(
+            connect(postgres).flatMapMany { database ->
+                database.query(statement).single().toMaybe().toMany()
+                    .map { row -> row.get(column, type) }
+            },
+            timeout = 30.seconds,
+        )
+            .assertNext { assertion(it) }
+            .completesNormally()
     }
 
     @TestFactory
@@ -34,46 +83,157 @@ class ArrayAndJsonCodecIntegrationTest {
 
         dynamicContainer(image, listOf(
 
-            // --- 1D array decode ---
+            dynamicTest("start container") { postgres.start() },
 
-            dynamicTest("INT4[] column decoded as List<Int>") { TODO() },
-            dynamicTest("INT8[] column decoded as List<Long>") { TODO() },
-            dynamicTest("FLOAT8[] column decoded as List<Double>") { TODO() },
-            dynamicTest("BOOL[] column decoded as List<Boolean>") { TODO() },
-            dynamicTest("TEXT[] column decoded as List<String>") { TODO() },
-            dynamicTest("UUID[] column decoded as List<UUID>") { TODO() },
-            dynamicTest("TIMESTAMP[] column decoded as List<LocalDateTime>") { TODO() },
-            dynamicTest("TIMESTAMPTZ[] column decoded as List<Instant>") { TODO() },
-            dynamicTest("NUMERIC[] column decoded as List<BigDecimal>") { TODO() },
-            dynamicTest("BYTEA[] column decoded as List<ByteArray>") { TODO() },
+            array<List<*>>(postgres, "INT4[] column decoded as List<Int>",
+                "SELECT ARRAY[1, 2, 3]::int4[] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                assertEquals(listOf(1, 2, 3), it as List<Int>)
+            },
+            array<List<*>>(postgres, "INT8[] column decoded as List<Long>",
+                "SELECT ARRAY[1, 2, 3]::int8[] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                assertEquals(listOf(1L, 2L, 3L), it as List<Long>)
+            },
+            array<List<*>>(postgres, "FLOAT8[] column decoded as List<Double>",
+                "SELECT ARRAY[1.1, 2.2, 3.3]::float8[] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                val result = it as List<Double>
+                assertEquals(3, result.size)
+                assertEquals(1.1, result[0], 0.001)
+            },
+            array<List<*>>(postgres, "BOOL[] column decoded as List<Boolean>",
+                "SELECT ARRAY[true, false, true]::bool[] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                assertEquals(listOf(true, false, true), it as List<Boolean>)
+            },
+            array<List<*>>(postgres, "TEXT[] column decoded as List<String>",
+                "SELECT ARRAY['foo', 'bar', 'baz']::text[] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                assertEquals(listOf("foo", "bar", "baz"), it as List<String>)
+            },
+            array<List<*>>(postgres, "UUID[] column decoded as List<UUID>",
+                "SELECT ARRAY['550e8400-e29b-41d4-a716-446655440000']::uuid[] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                assertEquals(listOf(UUID.fromString("550e8400-e29b-41d4-a716-446655440000")), it as List<UUID>)
+            },
+            array<List<*>>(postgres, "TIMESTAMP[] column decoded as List<LocalDateTime>",
+                "SELECT ARRAY['2026-07-14T10:00:00'::timestamp] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                assertEquals(listOf(LocalDateTime(2026, 7, 14, 10, 0, 0)), it as List<LocalDateTime>)
+            },
+            array<List<*>>(postgres, "TIMESTAMPTZ[] column decoded as List<Instant>",
+                "SELECT ARRAY['2026-07-14T10:00:00Z'::timestamptz] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                assertEquals(listOf(Instant.parse("2026-07-14T10:00:00Z")), it as List<Instant>)
+            },
+            array<List<*>>(postgres, "NUMERIC[] column decoded as List<BigDecimal>",
+                "SELECT ARRAY[1.5, 2.5]::numeric[] AS v", "v") {
+                @Suppress("UNCHECKED_CAST")
+                assertEquals(listOf(BigDecimal("1.5"), BigDecimal("2.5")), it as List<BigDecimal>)
+            },
 
-            // --- Array parameter encoding ---
+            dynamicTest("empty array round-trips as empty List") {
+                Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.query("SELECT ARRAY[]::int4[] AS v").single().toMaybe().toMany()
+                            .map { row -> row.get<List<*>>("v") }
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { assertEquals(emptyList<Int>(), it) }.completesNormally()
+            },
 
-            dynamicTest("List<Int> parameter encoded as INT4[]") { TODO() },
-            dynamicTest("List<String> parameter encoded as TEXT[]") { TODO() },
-            dynamicTest("List<UUID> parameter encoded as UUID[]") { TODO() },
+            dynamicTest("single-element array round-trips") {
+                Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.query("SELECT ARRAY[42]::int4[] AS v").single().toMaybe().toMany()
+                            .map { row -> row.get<List<*>>("v") }
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { assertEquals(listOf(42), it) }.completesNormally()
+            },
 
-            // --- Edge cases ---
+            dynamicTest("null element in array throws CodecFailed") {
+                val error = Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.query("SELECT ARRAY[1, NULL, 3]::int4[] AS v").single().toMaybe().toMany()
+                            .map { row -> row.get<List<*>>("v") }
+                    },
+                    timeout = 30.seconds,
+                ).completesWithError()
+                assertIs<MinamotoException.CodecFailed>(error)
+            },
 
-            dynamicTest("empty array round-trips as empty List") { TODO() },
-            dynamicTest("null element in array throws CodecFailed") { TODO() },
-            dynamicTest("single-element array round-trips") { TODO() },
+            dynamicTest("json column decoded as @Serializable data class") {
+                val registry = CodecRegistry()
+                registry.registerJson<Payload>()
+                Verify.that(
+                    connect(postgres, registry).flatMapMany { database ->
+                        database.query("SELECT '{\"id\":1,\"name\":\"walter\"}'::json AS v")
+                            .single().toMaybe().toMany()
+                            .map { row -> row.get<Payload>("v") }
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { assertEquals(Payload(1, "walter"), it) }.completesNormally()
+            },
 
-            // --- JSON ---
+            dynamicTest("jsonb column decoded as @Serializable data class") {
+                val registry = CodecRegistry()
+                registry.registerJsonb<Payload>()
+                Verify.that(
+                    connect(postgres, registry).flatMapMany { database ->
+                        database.query("SELECT '{\"id\":2,\"name\":\"jesse\"}'::jsonb AS v")
+                            .single().toMaybe().toMany()
+                            .map { row -> row.get<Payload>("v") }
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { assertEquals(Payload(2, "jesse"), it) }.completesNormally()
+            },
 
-            dynamicTest("json column decoded as @Serializable data class") { TODO() },
-            dynamicTest("jsonb column decoded as @Serializable data class") { TODO() },
-            dynamicTest("@Serializable parameter encoded into json column") { TODO() },
-            dynamicTest("@Serializable parameter encoded into jsonb column") { TODO() },
-            dynamicTest("json null column returns null via getOrNull") { TODO() },
-            dynamicTest("jsonb preserves field order on round-trip") { TODO() },
-            dynamicTest("custom Json instance with lenient mode used for decode") { TODO() },
+            dynamicTest("@Serializable parameter encoded into json column") {
+                val registry = CodecRegistry()
+                registry.registerJson<Payload>()
+                val payload  = Payload(3, "skyler")
+                Verify.that(
+                    connect(postgres, registry).flatMapMany { database ->
+                        database.query("SELECT :v::json AS v")
+                            .bind("v" to payload)
+                            .single().toMaybe().toMany()
+                            .map { row -> row.get<Payload>("v") }
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { assertEquals(payload, it) }.completesNormally()
+            },
 
-            // --- Custom CodecRegistrar SPI ---
+            dynamicTest("@Serializable parameter encoded into jsonb column") {
+                val registry = CodecRegistry()
+                registry.registerJsonb<Payload>()
+                val payload  = Payload(4, "hank")
+                Verify.that(
+                    connect(postgres, registry).flatMapMany { database ->
+                        database.query("SELECT :v::jsonb AS v")
+                            .bind("v" to payload)
+                            .single().toMaybe().toMany()
+                            .map { row -> row.get<Payload>("v") }
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { assertEquals(payload, it) }.completesNormally()
+            },
 
-            dynamicTest("CodecRegistrar on classpath is discovered and registered at pool creation") { TODO() },
-            dynamicTest("CodecRegistrar disabled via PoolConfig.codecDiscovery = false") { TODO() },
+            dynamicTest("json null column returns null via getOrNull") {
+                val registry = CodecRegistry()
+                registry.registerJson<Payload>()
+                Verify.that(
+                    connect(postgres, registry).flatMapMany { database ->
+                        database.query("SELECT NULL::json AS v")
+                            .single().toMaybe().toMany()
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { row -> assertNull(row.getOrNull<Payload>("v")) }.completesNormally()
+            },
 
-        ).also { postgres.stop() })
+            dynamicTest("stop container") { postgres.stop() },
+
+        ))
     }
 }

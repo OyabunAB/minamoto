@@ -17,6 +17,7 @@ package se.oyabun.minamoto.postgres.codec
 
 import java.nio.ByteBuffer
 import kotlin.reflect.KClass
+import se.oyabun.minamoto.MinamotoException
 
 /**
  * Handles one-dimensional Postgres arrays in binary format.
@@ -67,7 +68,9 @@ internal class ArrayCodec<T : Any>(
         val result = ArrayList<T>(size)
         repeat(size) { index ->
             val length = buffer.int
-            check(length != -1) { "null element at index $index in array OID $sourceOid — not supported" }
+            if (length == -1) throw MinamotoException.CodecFailed(
+                "null element at index $index in array OID $sourceOid — use getOrNull or handle nulls before storing in arrays"
+            )
             val elementBytes = ByteArray(length)
             buffer.get(elementBytes)
             result.add(elementCodec.decode(elementBytes, elementOid))

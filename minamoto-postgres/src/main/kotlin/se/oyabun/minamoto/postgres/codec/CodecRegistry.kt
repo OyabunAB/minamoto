@@ -169,7 +169,6 @@ class CodecRegistry(
         register(Oid.INT2, IntCodec)
         register(Oid.FLOAT4, DoubleCodec)
 
-        // Array codecs for all built-in scalar codecs
         builtInCodecs.forEach { elementCodec ->
             val arrayOid = arrayOidByElementOid[elementCodec.oid] ?: return@forEach
             register(ArrayCodec(arrayOid, elementCodec.oid, elementCodec))

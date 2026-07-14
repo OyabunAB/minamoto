@@ -102,8 +102,9 @@ interface QueryBuilder {
 /**
  * A query with parameters encoded, ready to stream rows.
  *
- * [multiple] streams all result rows. [single] asserts exactly one row and errors on
- * zero or more than one. [optional] returns the first row or an empty [Maybe].
+ * [multiple] streams all result rows. [single] returns the first row and errors if zero rows are
+ * returned — it does NOT error on more than one row; extra rows are discarded.
+ * [optional] returns the first row or an empty [Maybe].
  */
 interface BoundQuery {
     fun multiple(): Many<Row>
@@ -169,6 +170,7 @@ interface Database {
     fun command(statement: String): CommandBuilder
     fun effect(statement: String):  EffectBuilder
 
+    /** If [block] throws, the transaction is automatically rolled back before the exception propagates to the caller. */
     suspend fun <T> transaction(
         mode:       TransactionMode       = TransactionMode.Join,
         definition: TransactionDefinition = TransactionDefinition(),

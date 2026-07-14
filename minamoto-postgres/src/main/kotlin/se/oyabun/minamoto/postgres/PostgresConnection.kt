@@ -188,6 +188,7 @@ data class ConnectionConfig(
     val user:             String,
     val password:         String,
     val database:         String = user,
+    /** Controls the PGwire `Execute.maxRows` per round-trip. 50 means 50 rows per Execute → PortalSuspended → next Execute cycle. Increase for large result sets to reduce round-trips. */
     val defaultFetchSize: Int    = 50,
 )
 

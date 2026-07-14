@@ -166,6 +166,11 @@ private fun rewriteAndEncode(
     return Pair(result.toString(), parameters)
 }
 
+/**
+ * Encodes a named binding to a [Parameter].
+ *
+ * Passing `null` for [value] throws [MinamotoException.InvalidState] — use [Parameter.Undefined] to bind SQL NULL.
+ */
 private fun encodeBinding(name: String, value: Any?, connection: PostgresConnection): Parameter {
     if (value == null) throw MinamotoException.InvalidState(
         "no binding provided for parameter :$name — use Parameter.Undefined for SQL NULL"

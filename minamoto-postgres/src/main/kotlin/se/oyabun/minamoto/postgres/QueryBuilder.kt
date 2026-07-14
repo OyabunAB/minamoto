@@ -20,9 +20,17 @@ import se.oyabun.aelv.Maybe
 import se.oyabun.aelv.One
 import se.oyabun.aelv.firstMaybe
 import se.oyabun.aelv.or
+import se.oyabun.minamoto.Binding
+import se.oyabun.minamoto.BoundCommand
+import se.oyabun.minamoto.BoundEffect
+import se.oyabun.minamoto.BoundQuery
+import se.oyabun.minamoto.CommandBuilder
+import se.oyabun.minamoto.EffectBuilder
 import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.QueryBuilder
 import se.oyabun.minamoto.Row
 import se.oyabun.minamoto.postgres.protocol.executeCommand
+import se.oyabun.minamoto.postgres.protocol.executeEffect
 import se.oyabun.minamoto.postgres.protocol.executeQuery
 
 /**
@@ -32,55 +40,38 @@ import se.oyabun.minamoto.postgres.protocol.executeQuery
  * parameters (`$1`, `$2`, ...) and encodes the values via the [CodecRegistry] held on
  * the connection.
  */
-class PreparedQuery internal constructor(
+class PostgresQuery internal constructor(
     private val connection: PostgresConnection,
-    private val sql:        String,
-) {
-    fun bind(vararg bindings: Binding): BoundQuery {
-        val (rewrittenSql, parameters) = rewriteAndEncode(sql, bindings.toList(), connection)
-        return BoundQuery(connection, rewrittenSql, parameters)
+    private val statement:  String,
+) : QueryBuilder {
+    override fun bind(vararg bindings: Binding): PostgresBoundQuery {
+        val (rewrittenSql, parameters) = rewriteAndEncode(statement, bindings.toList(), connection)
+        return PostgresBoundQuery(connection, rewrittenSql, parameters)
     }
-
-    /** Execute with no parameters. */
-    fun multiple(): Many<Row> = bind().multiple()
-    fun single(): One<Row>    = bind().single()
-    fun optional(): Maybe<Row> = bind().optional()
 }
 
 /**
  * A command (INSERT / UPDATE / DELETE / DDL) with named parameters, ready to be bound.
  */
-class PreparedCommand internal constructor(
+class PostgresCommand internal constructor(
     private val connection: PostgresConnection,
-    private val sql:        String,
-) {
-    fun bind(vararg bindings: Binding): BoundCommand {
-        val (rewrittenSql, parameters) = rewriteAndEncode(sql, bindings.toList(), connection)
-        return BoundCommand(connection, rewrittenSql, parameters)
+    private val statement:  String,
+) : CommandBuilder {
+    override fun bind(vararg bindings: Binding): PostgresBoundCommand {
+        val (rewrittenSql, parameters) = rewriteAndEncode(statement, bindings.toList(), connection)
+        return PostgresBoundCommand(connection, rewrittenSql, parameters)
     }
-
-    fun single(): One<Long> = BoundCommand(connection, sql, emptyList()).single()
 }
 
-/**
- * A query with encoded parameters, ready to execute.
- *
- * Use [multiple] to stream all rows, [single] to assert exactly one row,
- * or [optional] when zero or one row is expected.
- */
-class BoundQuery internal constructor(
+class PostgresBoundQuery internal constructor(
     private val connection: PostgresConnection,
-    private val sql:        String,
+    private val statement:  String,
     private val parameters: Parameters,
-) {
-    /** Stream all result rows. */
-    fun multiple(): Many<Row> = connection.executeQuery(sql, parameters)
+) : BoundQuery {
 
-    /**
-     * Return exactly one row. Signals [MinamotoException.QueryFailed] (SQLSTATE 02000)
-     * if the query returns zero rows, or if it returns more than one.
-     */
-    fun single(): One<Row> = connection.executeQuery(sql, parameters)
+    override fun multiple(): Many<Row> = connection.executeQuery(statement, parameters)
+
+    override fun single(): One<Row> = connection.executeQuery(statement, parameters)
         .firstMaybe()
         .or { throw MinamotoException.QueryFailed(
             message  = "expected exactly one row but got none",
@@ -88,20 +79,16 @@ class BoundQuery internal constructor(
             severity = "ERROR",
         )}
 
-    /** Return the first row if present, empty [Maybe] if the query returns no rows. */
-    fun optional(): Maybe<Row> = connection.executeQuery(sql, parameters).firstMaybe()
+    override fun optional(): Maybe<Row> = connection.executeQuery(statement, parameters).firstMaybe()
 }
 
-/**
- * A command with encoded parameters, ready to execute.
- */
-class BoundCommand internal constructor(
+class PostgresBoundCommand internal constructor(
     private val connection: PostgresConnection,
-    private val sql:        String,
+    private val statement:  String,
     private val parameters: Parameters,
-) {
-    /** Execute and return the number of rows affected. */
-    fun single(): One<Long> = connection.executeCommand(sql, parameters)
+) : BoundCommand {
+
+    override fun count(): One<Long> = connection.executeCommand(statement, parameters)
 }
 
 /**
@@ -189,5 +176,24 @@ private fun encodeBinding(name: String, value: Any?, connection: PostgresConnect
     return Parameter.Defined(bytes, fmt)
 }
 
-internal fun PostgresConnection.query(sql: String): PreparedQuery = PreparedQuery(this, sql)
-internal fun PostgresConnection.command(sql: String): PreparedCommand = PreparedCommand(this, sql)
+internal fun PostgresConnection.query(statement: String): PostgresQuery = PostgresQuery(this, statement)
+internal fun PostgresConnection.command(statement: String): PostgresCommand = PostgresCommand(this, statement)
+internal fun PostgresConnection.effect(statement: String): PostgresEffect = PostgresEffect(this, statement)
+
+class PostgresEffect internal constructor(
+    private val connection: PostgresConnection,
+    private val statement:  String,
+) : EffectBuilder {
+    override fun bind(vararg bindings: Binding): PostgresBoundEffect {
+        val (rewrittenStatement, parameters) = rewriteAndEncode(statement, bindings.toList(), connection)
+        return PostgresBoundEffect(connection, rewrittenStatement, parameters)
+    }
+}
+
+class PostgresBoundEffect internal constructor(
+    private val connection: PostgresConnection,
+    private val statement:  String,
+    private val parameters: Parameters,
+) : BoundEffect {
+    override fun execute() = connection.executeEffect(statement, parameters)
+}

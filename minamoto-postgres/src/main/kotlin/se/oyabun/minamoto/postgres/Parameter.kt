@@ -17,9 +17,6 @@ package se.oyabun.minamoto.postgres
 
 import se.oyabun.minamoto.postgres.codec.FormatCode
 
-/** A named parameter binding — name to value. Use Kotlin's `to` infix: `"id" to 42`. */
-typealias Binding = Pair<String, Any>
-
 /**
  * An encoded query parameter ready for the wire.
  *

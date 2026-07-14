@@ -16,6 +16,7 @@
 package se.oyabun.minamoto
 
 import se.oyabun.aelv.Many
+import se.oyabun.aelv.Maybe
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 import kotlin.reflect.KClass
@@ -82,97 +83,91 @@ data class RowMetadata(val columns: List<ColumnMetadata>) {
         columns.firstOrNull { it.name == name } ?: throw MinamotoException.UnknownColumn(name)
 }
 
+/** A named parameter binding — name to value. Use Kotlin's `to` infix: `"id" to 42`. */
+typealias Binding = Pair<String, Any>
+
 /**
- * A pre-configured, reusable query that maps result rows to [T].
+ * A query ready to have parameters bound.
  *
- * Define it once against a [Database], then call it with parameters as needed.
- * The underlying prepared statement is created on first execution and reused for
- * the lifetime of the connection.
- *
- * Example:
- * ```kotlin
- * val findUser = db.query("SELECT * FROM users WHERE id = $1") { row ->
- *     User(row.get("id"), row.get("name"))
- * }
- * val user: Many<User> = findUser(42)
- * ```
+ * Call [bind] with named parameter bindings to produce a [BoundQuery], or call the
+ * terminal methods directly when the query has no parameters.
  */
-fun interface Query<T : Any> {
-    operator fun invoke(vararg params: Any): Many<T>
+interface QueryBuilder {
+    fun bind(vararg bindings: Binding): BoundQuery
+    fun multiple(): Many<Row>  = bind().multiple()
+    fun single():   One<Row>   = bind().single()
+    fun optional(): Maybe<Row> = bind().optional()
 }
 
 /**
- * A pre-configured, reusable command (INSERT / UPDATE / DELETE / DDL).
+ * A query with parameters encoded, ready to stream rows.
  *
- * Returns the number of rows affected. For DDL statements that do not affect rows,
- * the value is `0`.
- *
- * Example:
- * ```kotlin
- * val updateBalance = db.command("UPDATE accounts SET balance = $1 WHERE id = $2")
- * val affected: One<Long> = updateBalance(100, 42)
- * ```
+ * [multiple] streams all result rows. [single] asserts exactly one row and errors on
+ * zero or more than one. [optional] returns the first row or an empty [Maybe].
  */
-fun interface Command {
-    operator fun invoke(vararg params: Any): One<Long>
+interface BoundQuery {
+    fun multiple(): Many<Row>
+    fun single():   One<Row>
+    fun optional(): Maybe<Row>
 }
 
 /**
- * A pre-configured, reusable command with no meaningful return value.
+ * A command (INSERT / UPDATE / DELETE / DDL) ready to have parameters bound.
  *
- * Use for fire-and-forget operations like `NOTIFY`, `SET`, or DDL where
- * the row count is irrelevant.
+ * Call [bind] with named parameter bindings to produce a [BoundCommand], or call
+ * [execute] directly when the command has no parameters.
  */
-fun interface Effect {
-    operator fun invoke(vararg params: Any): None<Unit>
+interface CommandBuilder {
+    fun bind(vararg bindings: Binding): BoundCommand
+    fun count(): One<Long> = bind().count()
 }
 
 /**
- * A pre-configured, reusable batch command.
+ * A command with parameters encoded, ready to execute.
  *
- * Sends multiple parameter sets in a single round-trip. Each element of [batches]
- * is one set of bind parameters. Returns affected row counts in the same order
- * as the input batches.
- *
- * Example:
- * ```kotlin
- * val insertUser = db.batch("INSERT INTO users (id, name) VALUES ($1, $2)")
- * val counts: Many<Long> = insertUser(listOf(arrayOf(1, "walter"), arrayOf(2, "jesse")))
- * ```
+ * Returns the number of rows affected. DDL returns 0.
  */
-fun interface Batch {
-    operator fun invoke(batches: List<Array<out Any>>): Many<Long>
+interface BoundCommand {
+    fun count(): One<Long>
+}
+
+/**
+ * A fire-and-forget statement ready to have parameters bound.
+ *
+ * Use for DDL, NOTIFY, SET, and any statement where the result is irrelevant.
+ * Call [bind] with named parameter bindings to produce a [BoundEffect], or call
+ * [execute] directly when the statement has no parameters.
+ */
+interface EffectBuilder {
+    fun bind(vararg bindings: Binding): BoundEffect
+    fun execute(): None<Unit> = bind().execute()
+}
+
+/** A fire-and-forget statement with parameters encoded, ready to execute. */
+interface BoundEffect {
+    fun execute(): None<Unit>
 }
 
 /**
  * The top-level handle for interacting with the database.
  *
- * Operations are defined once via [query], [command], [effect], or [batch] and called
- * repeatedly with parameters. Connection acquisition and release is fully transparent —
- * the caller never holds a connection directly.
+ * Named parameters in queries use `:name` syntax — bind them with Kotlin's `to` infix:
+ * `"id" to 42`.
  *
- * Transactions are scoped to a coroutine via [transaction]. Any operation executed within
- * a [transaction] block participates automatically — no connection or transaction handle
- * is passed around.
+ * Connection acquisition and release is fully transparent — callers never hold a
+ * connection directly.
  *
- * Example:
- * ```kotlin
- * db.transaction {
- *     debit(accountId, amount)
- *     credit(targetId, amount)
- * }
- * ```
+ * Transactions are scoped to a coroutine via [transaction]. Any operation executed
+ * within a [transaction] block participates automatically.
  *
  * Nested [transaction] calls with [TransactionMode.Join] reuse the active transaction.
  * [TransactionMode.New] always starts a fresh transaction, becoming a savepoint if one
  * is already active.
  */
 interface Database {
-
-    fun <T : Any> query(sql: String, map: (Row) -> T): Query<T>
-    fun command(sql: String): Command
-    fun effect(sql: String): Effect
-    fun batch(sql: String): Batch
+    fun query(statement: String):   QueryBuilder
+    fun command(statement: String): CommandBuilder
+    fun effect(statement: String):  EffectBuilder
 
     suspend fun <T> transaction(
         mode:       TransactionMode       = TransactionMode.Join,

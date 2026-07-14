@@ -284,9 +284,9 @@ internal object LocalTimeCodec : Codec<LocalTime> {
 }
 
 /**
- * Binary format: int64 UTC microseconds since midnight + int32 offset seconds.
- * Postgres stores the offset as seconds west of UTC; Java uses east of UTC — signs are flipped.
- * No kotlinx.datetime equivalent for offset-aware time exists; [java.time.OffsetTime] is kept.
+ * Binary format: int64 local-time microseconds since midnight + int32 offset seconds.
+ * Postgres stores the local time (not UTC) and offset west of UTC separately.
+ * Offset is west-positive; Java uses east-positive — signs are flipped.
  */
 internal object OffsetTimeCodec : Codec<OffsetTime> {
     override val oid             = Oid.TIMETZ
@@ -294,21 +294,21 @@ internal object OffsetTimeCodec : Codec<OffsetTime> {
     override val preferredFormat = FormatCode.BINARY
 
     override fun encode(value: OffsetTime): Pair<ByteArray, FormatCode> {
-        val utcMicros     = value.withOffsetSameInstant(ZoneOffset.UTC).toLocalTime().toNanoOfDay() / 1_000L
+        val localMicros   = value.toLocalTime().toNanoOfDay() / 1_000L
         val offsetSeconds = -value.offset.totalSeconds
         val buffer        = ByteBuffer.allocate(12)
-        buffer.putLong(utcMicros)
+        buffer.putLong(localMicros)
         buffer.putInt(offsetSeconds)
         return Pair(buffer.array(), FormatCode.BINARY)
     }
 
     override fun decode(bytes: ByteArray, sourceOid: Int): OffsetTime {
         val buffer       = ByteBuffer.wrap(bytes)
-        val utcMicros    = buffer.long
+        val localMicros  = buffer.long
         val pgOffsetSecs = buffer.int
         val javaOffset   = ZoneOffset.ofTotalSeconds(-pgOffsetSecs)
-        val utcTime      = java.time.LocalTime.ofNanoOfDay(utcMicros * 1_000L)
-        return OffsetTime.of(utcTime, ZoneOffset.UTC).withOffsetSameInstant(javaOffset)
+        val localTime    = java.time.LocalTime.ofNanoOfDay(localMicros * 1_000L)
+        return OffsetTime.of(localTime, javaOffset)
     }
 }
 

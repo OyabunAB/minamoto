@@ -1,22 +1,38 @@
 package se.oyabun.minamoto.postgres
 
-import org.junit.jupiter.api.Disabled
+import kotlinx.datetime.Instant
+import kotlinx.datetime.LocalDate
+import kotlinx.datetime.LocalDateTime
+import kotlinx.datetime.LocalTime
 import org.junit.jupiter.api.DynamicContainer.dynamicContainer
 import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
+import se.oyabun.aelv.One
+import se.oyabun.aelv.Verify
+import se.oyabun.aelv.await
+import se.oyabun.aelv.flatMapMany
+import se.oyabun.aelv.map
+import se.oyabun.aelv.netty.NettyTransport
+import se.oyabun.aelv.rightOrThrow
+import se.oyabun.aelv.toMaybe
+import se.oyabun.aelv.toMany
+import se.oyabun.minamoto.Binding
+import se.oyabun.minamoto.ConnectionId
+import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.postgres.protocol.handshake
+import java.math.BigDecimal
+import java.time.OffsetTime
+import java.time.ZoneOffset
+import java.util.UUID
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNull
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
-/**
- * Tier 1 — codec integration tests.
- *
- * Verifies that every built-in type round-trips correctly through [se.oyabun.minamoto.postgres.codec.CodecRegistry]
- * when executing real queries against Postgres. Covers binary format negotiation in Bind,
- * null handling, parameter encoding, and rowsUpdated from CommandComplete.
- *
- * Requires [se.oyabun.minamoto.postgres.PgRow] and Bind format-code wiring to be implemented.
- */
-@Disabled("Requires PgRow + Bind format-code wiring — Phase 1")
 class CodecIntegrationTest {
 
     companion object {
@@ -28,6 +44,58 @@ class CodecIntegrationTest {
         )
     }
 
+    private fun connect(postgres: PostgreSQLContainer): One<PostgresDatabase> =
+        One.defer {
+            val transport           = NettyTransport()
+            val nettyConnection     = transport.connect(postgres.host, postgres.firstMappedPort).await().rightOrThrow()
+            val postgresConnection  = PostgresConnection(
+                id         = ConnectionId(System.nanoTime()),
+                connection = nettyConnection,
+                transport  = transport,
+            )
+            postgresConnection.handshake(postgres.username, postgres.password, postgres.databaseName)
+            PostgresDatabase(postgresConnection)
+        }
+
+    private inline fun <reified T : Any> scalar(
+        postgres:  PostgreSQLContainer,
+        label:     String,
+        statement: String,
+        column:    String,
+        noinline assertion: (T) -> Unit,
+    ) = dynamicTest(label) {
+        val type = T::class
+        Verify.that(
+            connect(postgres).flatMapMany { database ->
+                database.query(statement).single().toMaybe().toMany()
+                    .map { row -> row.get(column, type) }
+            },
+            timeout = 30.seconds,
+        )
+            .assertNext { assertion(it) }
+            .completesNormally()
+    }
+
+    private inline fun <reified T : Any> param(
+        postgres:  PostgreSQLContainer,
+        label:     String,
+        statement: String,
+        binding:   Binding,
+        column:    String,
+        noinline assertion: (T) -> Unit,
+    ) = dynamicTest(label) {
+        val type = T::class
+        Verify.that(
+            connect(postgres).flatMapMany { database ->
+                database.query(statement).bind(binding).single().toMaybe().toMany()
+                    .map { row -> row.get(column, type) }
+            },
+            timeout = 30.seconds,
+        )
+            .assertNext { assertion(it) }
+            .completesNormally()
+    }
+
     @TestFactory
     fun `codec integration across postgres versions`() = postgresImages.map { image ->
         val postgres = PostgreSQLContainer(
@@ -36,71 +104,184 @@ class CodecIntegrationTest {
 
         dynamicContainer(image, listOf(
 
-            // --- Scalar decode via row.get<T> ---
+            dynamicTest("start container") { postgres.start() },
 
-            dynamicTest("bool column decoded as Boolean") { TODO() },
-            dynamicTest("int2 column decoded as Short") { TODO() },
-            dynamicTest("int4 column decoded as Int") { TODO() },
-            dynamicTest("int8 column decoded as Long") { TODO() },
-            dynamicTest("int4 column widened to Long") { TODO() },
-            dynamicTest("int2 column widened to Int") { TODO() },
-            dynamicTest("float4 column decoded as Float") { TODO() },
-            dynamicTest("float8 column decoded as Double") { TODO() },
-            dynamicTest("float4 column widened to Double") { TODO() },
-            dynamicTest("numeric column decoded as BigDecimal") { TODO() },
-            dynamicTest("text column decoded as String") { TODO() },
-            dynamicTest("varchar column decoded as String") { TODO() },
-            dynamicTest("bpchar column decoded as String") { TODO() },
-            dynamicTest("bytea column decoded as ByteArray") { TODO() },
-            dynamicTest("uuid column decoded as UUID") { TODO() },
-            dynamicTest("date column decoded as LocalDate") { TODO() },
-            dynamicTest("time column decoded as LocalTime") { TODO() },
-            dynamicTest("timetz column decoded as OffsetTime") { TODO() },
-            dynamicTest("timestamp column decoded as LocalDateTime") { TODO() },
-            dynamicTest("timestamptz column decoded as Instant") { TODO() },
-            dynamicTest("interval column decoded as Duration") { TODO() },
+            scalar<Boolean>(postgres, "bool column decoded as Boolean",
+                "SELECT true::bool AS v", "v") { assertEquals(true, it) },
+            scalar<Short>(postgres, "int2 column decoded as Short",
+                "SELECT 32767::int2 AS v", "v") { assertEquals(Short.MAX_VALUE, it) },
+            scalar<Int>(postgres, "int4 column decoded as Int",
+                "SELECT 2147483647::int4 AS v", "v") { assertEquals(Int.MAX_VALUE, it) },
+            scalar<Long>(postgres, "int8 column decoded as Long",
+                "SELECT 9223372036854775807::int8 AS v", "v") { assertEquals(Long.MAX_VALUE, it) },
+            scalar<Long>(postgres, "int4 column widened to Long",
+                "SELECT 42::int4 AS v", "v") { assertEquals(42L, it) },
+            scalar<Int>(postgres, "int2 column widened to Int",
+                "SELECT 7::int2 AS v", "v") { assertEquals(7, it) },
+            scalar<Float>(postgres, "float4 column decoded as Float",
+                "SELECT 3.14::float4 AS v", "v") { assertEquals(3.14f, it, 0.001f) },
+            scalar<Double>(postgres, "float8 column decoded as Double",
+                "SELECT 3.141592653589793::float8 AS v", "v") { assertEquals(3.141592653589793, it, 1e-9) },
+            scalar<Double>(postgres, "float4 column widened to Double",
+                "SELECT 1.5::float4 AS v", "v") { assertEquals(1.5, it, 0.001) },
+            scalar<BigDecimal>(postgres, "numeric column decoded as BigDecimal",
+                "SELECT 123.45::numeric AS v", "v") { assertEquals(BigDecimal("123.45"), it) },
+            scalar<String>(postgres, "text column decoded as String",
+                "SELECT 'hello'::text AS v", "v") { assertEquals("hello", it) },
+            scalar<String>(postgres, "varchar column decoded as String",
+                "SELECT 'world'::varchar(10) AS v", "v") { assertEquals("world", it) },
+            scalar<String>(postgres, "bpchar column decoded as String",
+                "SELECT 'x'::bpchar AS v", "v") { assertEquals("x", it.trim()) },
+            scalar<ByteArray>(postgres, "bytea column decoded as ByteArray",
+                "SELECT '\\xDEADBEEF'::bytea AS v", "v") {
+                assertEquals(
+                    listOf<Byte>(0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte()),
+                    it.toList(),
+                )
+            },
+            scalar<UUID>(postgres, "uuid column decoded as UUID",
+                "SELECT '550e8400-e29b-41d4-a716-446655440000'::uuid AS v", "v") {
+                assertEquals(UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), it)
+            },
+            scalar<LocalDate>(postgres, "date column decoded as LocalDate",
+                "SELECT '2026-07-14'::date AS v", "v") { assertEquals(LocalDate(2026, 7, 14), it) },
+            scalar<LocalTime>(postgres, "time column decoded as LocalTime",
+                "SELECT '10:30:00'::time AS v", "v") { assertEquals(LocalTime(10, 30, 0), it) },
+            scalar<OffsetTime>(postgres, "timetz column decoded as OffsetTime",
+                "SELECT '14:30:00+02:00'::timetz AS v", "v") {
+                assertEquals(OffsetTime.of(14, 30, 0, 0, ZoneOffset.ofHours(2)), it)
+            },
+            scalar<LocalDateTime>(postgres, "timestamp column decoded as LocalDateTime",
+                "SELECT '2026-07-14T10:00:00'::timestamp AS v", "v") {
+                assertEquals(LocalDateTime(2026, 7, 14, 10, 0, 0), it)
+            },
+            scalar<Instant>(postgres, "timestamptz column decoded as Instant",
+                "SELECT '2026-07-14T10:00:00Z'::timestamptz AS v", "v") {
+                assertEquals(Instant.parse("2026-07-14T10:00:00Z"), it)
+            },
+            scalar<kotlin.time.Duration>(postgres, "interval column decoded as Duration",
+                "SELECT '2 hours 30 minutes'::interval AS v", "v") {
+                assertEquals(2.hours + 30.minutes, it)
+            },
 
-            // --- Null handling ---
+            dynamicTest("SQL NULL with getOrNull returns null") {
+                Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.query("SELECT NULL::text AS v").single().toMaybe().toMany()
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { row -> assertNull(row.getOrNull<String>("v")) }.completesNormally()
+            },
 
-            dynamicTest("SQL NULL with getOrNull returns null") { TODO() },
-            dynamicTest("SQL NULL with get throws UnexpectedNull") { TODO() },
-            dynamicTest("non-null value with getOrNull returns value") { TODO() },
+            dynamicTest("SQL NULL with get throws UnexpectedNull") {
+                val error = Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.query("SELECT NULL::text AS v").single().toMaybe().toMany()
+                            .map { row -> row.get<String>("v") }
+                    },
+                    timeout = 30.seconds,
+                ).completesWithError()
+                assertIs<MinamotoException.UnexpectedNull>(error)
+            },
 
-            // --- Parameter encoding ---
+            dynamicTest("non-null value with getOrNull returns value") {
+                Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.query("SELECT 'hello'::text AS v").single().toMaybe().toMany()
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { row -> assertEquals("hello", row.getOrNull<String>("v")) }.completesNormally()
+            },
 
-            dynamicTest("Boolean parameter encoded and round-tripped") { TODO() },
-            dynamicTest("Int parameter encoded and round-tripped") { TODO() },
-            dynamicTest("Long parameter encoded and round-tripped") { TODO() },
-            dynamicTest("Double parameter encoded and round-tripped") { TODO() },
-            dynamicTest("BigDecimal parameter encoded and round-tripped") { TODO() },
-            dynamicTest("String parameter encoded and round-tripped") { TODO() },
-            dynamicTest("ByteArray parameter encoded and round-tripped") { TODO() },
-            dynamicTest("UUID parameter encoded and round-tripped") { TODO() },
-            dynamicTest("LocalDate parameter encoded and round-tripped") { TODO() },
-            dynamicTest("LocalTime parameter encoded and round-tripped") { TODO() },
-            dynamicTest("LocalDateTime parameter encoded and round-tripped") { TODO() },
-            dynamicTest("Instant parameter encoded and round-tripped") { TODO() },
-            dynamicTest("Duration parameter encoded and round-tripped") { TODO() },
+            param<Boolean>(postgres, "Boolean parameter round-tripped",
+                "SELECT :v::bool AS v", "v" to true, "v") { assertEquals(true, it) },
+            param<Int>(postgres, "Int parameter round-tripped",
+                "SELECT :v::int4 AS v", "v" to 42, "v") { assertEquals(42, it) },
+            param<Long>(postgres, "Long parameter round-tripped",
+                "SELECT :v::int8 AS v", "v" to 9999L, "v") { assertEquals(9999L, it) },
+            param<Double>(postgres, "Double parameter round-tripped",
+                "SELECT :v::float8 AS v", "v" to 3.14, "v") { assertEquals(3.14, it, 1e-9) },
+            param<String>(postgres, "String parameter round-tripped",
+                "SELECT :v::text AS v", "v" to "minamoto", "v") { assertEquals("minamoto", it) },
+            param<UUID>(postgres, "UUID parameter round-tripped",
+                "SELECT :v::uuid AS v",
+                "v" to UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), "v") {
+                assertEquals(UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), it)
+            },
+            param<LocalDate>(postgres, "LocalDate parameter round-tripped",
+                "SELECT :v::date AS v", "v" to LocalDate(2026, 7, 14), "v") {
+                assertEquals(LocalDate(2026, 7, 14), it)
+            },
+            param<LocalTime>(postgres, "LocalTime parameter round-tripped",
+                "SELECT :v::time AS v", "v" to LocalTime(10, 30, 0), "v") {
+                assertEquals(LocalTime(10, 30, 0), it)
+            },
+            param<LocalDateTime>(postgres, "LocalDateTime parameter round-tripped",
+                "SELECT :v::timestamp AS v", "v" to LocalDateTime(2026, 7, 14, 10, 0, 0), "v") {
+                assertEquals(LocalDateTime(2026, 7, 14, 10, 0, 0), it)
+            },
+            param<Instant>(postgres, "Instant parameter round-tripped",
+                "SELECT :v::timestamptz AS v", "v" to Instant.parse("2026-07-14T10:00:00Z"), "v") {
+                assertEquals(Instant.parse("2026-07-14T10:00:00Z"), it)
+            },
 
-            // --- Binary format negotiation ---
+            dynamicTest("INSERT returns rowsUpdated = 1") {
+                Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.command("CREATE TEMP TABLE IF NOT EXISTS rows_test (id int)").count()
+                            .flatMapMany {
+                                database.command("INSERT INTO rows_test VALUES (1)").count()
+                                    .toMaybe().toMany()
+                            }
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { assertEquals(1L, it) }.completesNormally()
+            },
 
-            dynamicTest("binary format code 1 sent for int4 column in Bind") { TODO() },
-            dynamicTest("binary format code 1 sent for uuid column in Bind") { TODO() },
-            dynamicTest("text format code 0 sent for numeric column in Bind") { TODO() },
+            dynamicTest("DELETE returns rowsUpdated = 0 when no rows matched") {
+                Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.command("CREATE TEMP TABLE IF NOT EXISTS empty_test (id int)").count()
+                            .flatMapMany {
+                                database.command("DELETE FROM empty_test WHERE id = 999").count()
+                                    .toMaybe().toMany()
+                            }
+                    },
+                    timeout = 30.seconds,
+                ).assertNext { assertEquals(0L, it) }.completesNormally()
+            },
 
-            // --- rowsUpdated ---
+            dynamicTest("server error surfaces sqlState on QueryFailed") {
+                val error = Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.query("SELECT * FROM nonexistent_table_xyz").multiple()
+                    },
+                    timeout = 30.seconds,
+                ).completesWithError()
+                assertIs<MinamotoException.QueryFailed>(error)
+                assertEquals("42P01", (error as MinamotoException.QueryFailed).sqlState)
+            },
 
-            dynamicTest("INSERT returns rowsUpdated = 1") { TODO() },
-            dynamicTest("UPDATE affecting 3 rows returns rowsUpdated = 3") { TODO() },
-            dynamicTest("DELETE returns rowsUpdated = 0 when no rows matched") { TODO() },
-            dynamicTest("DDL returns rowsUpdated = 0") { TODO() },
+            dynamicTest("unique constraint violation has sqlState 23505") {
+                val error = Verify.that(
+                    connect(postgres).flatMapMany { database ->
+                        database.command("CREATE TEMP TABLE IF NOT EXISTS uniq_test (id int PRIMARY KEY)").count()
+                            .flatMapMany {
+                                database.command("INSERT INTO uniq_test VALUES (1)").count()
+                                    .flatMapMany {
+                                        database.command("INSERT INTO uniq_test VALUES (1)").count()
+                                            .toMaybe().toMany()
+                                    }
+                            }
+                    },
+                    timeout = 30.seconds,
+                ).completesWithError()
+                assertIs<MinamotoException.QueryFailed>(error)
+                assertEquals("23505", (error as MinamotoException.QueryFailed).sqlState)
+            },
 
-            // --- Error mapping ---
+            dynamicTest("stop container") { postgres.stop() },
 
-            dynamicTest("server error response surfaces sqlState on QueryFailed") { TODO() },
-            dynamicTest("unique constraint violation has sqlState 23505") { TODO() },
-            dynamicTest("unknown column reference has sqlState 42703") { TODO() },
-
-        ).also { postgres.stop() })
+        ))
     }
 }

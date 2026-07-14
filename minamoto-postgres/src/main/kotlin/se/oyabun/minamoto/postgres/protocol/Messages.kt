@@ -37,7 +37,7 @@ internal sealed interface FrontendMessage {
      */
     data class Parse(
         val statementName: String,
-        val sql:           String,
+        val statement:           String,
         val parameterOids: List<Int> = emptyList(),
     ) : FrontendMessage
 

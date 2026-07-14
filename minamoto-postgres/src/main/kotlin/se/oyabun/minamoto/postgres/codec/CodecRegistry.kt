@@ -105,6 +105,15 @@ class CodecRegistry(
     }
 
     /**
+     * Returns the preferred wire format for a given OID.
+     * Falls back to TEXT if no codec is registered for the OID.
+     */
+    fun preferredFormat(oid: Int): FormatCode =
+        codecs.entries.firstOrNull { (key, _) -> key.first == oid }
+            ?.value?.preferredFormat
+            ?: FormatCode.TEXT
+
+    /**
      * Returns the codec for [oid] + [type], applying numeric widening if no exact match exists.
      *
      * Throws [MinamotoException.CodecFailed] when no codec can be found or widened to.

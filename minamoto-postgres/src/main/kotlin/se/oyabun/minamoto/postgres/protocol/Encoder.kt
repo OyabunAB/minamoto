@@ -47,7 +47,7 @@ internal object MessageEncoder {
         is PasswordMessage     -> encodeSingleMessage('p', allocator) { writeCString(message.password) }
         is Parse               -> encodeSingleMessage('P', allocator) {
             writeCString(message.statementName)
-            writeCString(message.sql)
+            writeCString(message.statement)
             writeShort(message.parameterOids.size)
             message.parameterOids.forEach { writeInt(it) }
         }

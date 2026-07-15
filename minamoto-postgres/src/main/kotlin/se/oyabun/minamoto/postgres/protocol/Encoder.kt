@@ -28,6 +28,7 @@ import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Parse
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.PasswordMessage
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.SASLInitialResponse
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.SASLResponse
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.SSLRequest
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.StartupMessage
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Sync
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Terminate
@@ -84,6 +85,7 @@ internal object MessageEncoder {
         is Sync                -> encodeSingleMessage('S', allocator) {}
         is Terminate           -> encodeSingleMessage('X', allocator) {}
         is CancelRequest       -> encodeCancelRequest(message, allocator)
+        is SSLRequest          -> encodeSSLRequest(allocator)
         is SASLInitialResponse -> encodeSingleMessage('p', allocator) {
             writeCString(message.mechanism)
             writeInt(message.clientFirstMessage.size)
@@ -107,6 +109,13 @@ internal object MessageEncoder {
         buffer.writeCString(message.applicationName)
         buffer.writeByte(0)
         buffer.setInt(startIndex, buffer.writerIndex() - startIndex)
+        return buffer
+    }
+
+    private fun encodeSSLRequest(allocator: ByteBufAllocator): ByteBuf {
+        val buffer = allocator.buffer(8)
+        buffer.writeInt(8)
+        buffer.writeInt(SSL_REQUEST_CODE)
         return buffer
     }
 
@@ -140,4 +149,5 @@ internal object MessageEncoder {
 
     private const val PROTOCOL_VERSION    = 196608   // 3.0
     private const val CANCEL_REQUEST_CODE = 80877102
+    private const val SSL_REQUEST_CODE    = 80877103
 }

@@ -26,6 +26,8 @@ import se.oyabun.aelv.drain
 import se.oyabun.aelv.netty.NettyConnection
 import se.oyabun.aelv.netty.NettyTransport
 import se.oyabun.aelv.netty.inbound
+import se.oyabun.aelv.netty.readRawByte
+import se.oyabun.aelv.netty.upgradeTls
 import se.oyabun.aelv.netty.write
 import se.oyabun.aelv.publishOn
 import se.oyabun.aelv.rightOrThrow
@@ -63,10 +65,10 @@ import java.util.concurrent.ConcurrentLinkedQueue
  */
 internal class PostgresConnection(
     override val id:         ConnectionId,
-    private  val connection: NettyConnection,
+    internal val connection: NettyConnection,
     private  val transport:  NettyTransport,
     internal val registry:   CodecRegistry    = CodecRegistry(),
-    private  val allocator:  ByteBufAllocator = connection.channel.alloc(),
+    internal val allocator:  ByteBufAllocator = connection.channel.alloc(),
 ) : Connection {
 
     private val log = Logging.of<PostgresConnection>()
@@ -224,6 +226,7 @@ data class ConnectionConfig(
     val user:             String,
     val password:         String,
     val database:         String = user,
+    val sslMode:          se.oyabun.aelv.netty.SslMode = se.oyabun.aelv.netty.SslMode.Prefer,
     /** Controls the PGwire `Execute.maxRows` per round-trip. 50 means 50 rows per Execute → PortalSuspended → next Execute cycle. Increase for large result sets to reduce round-trips. */
     val defaultFetchSize: Int    = 50,
 )
@@ -240,6 +243,11 @@ class PostgresConnectionFactory(
         val nettyConnection = transport.connect(config.host, config.port)
             .await()
             .rightOrThrow()
+
+        // TLS negotiation happens at the raw channel level before PostgresConnection
+        // wraps the channel — before any framing or subscription is active.
+        negotiateSsl(nettyConnection, config.host, config.sslMode)
+
         val connection = PostgresConnection(
             id         = ConnectionId(idCounter.incrementAndGet()),
             connection = nettyConnection,
@@ -255,4 +263,39 @@ class PostgresConnectionFactory(
 
     override suspend fun destroy(connection: se.oyabun.minamoto.Connection) =
         connection.close()
+}
+
+/**
+ * Sends PGwire SSLRequest and reads the single-byte server response before any
+ * [PostgresConnection] framing is active.
+ *
+ * Must be called on the raw [NettyConnection] before wrapping it in [PostgresConnection],
+ * because [PostgresConnection] subscribes to [inbound][NettyConnection] on construction
+ * and would consume the 'S'/'N' byte before [readRawByte] can intercept it.
+ */
+private suspend fun negotiateSsl(
+    connection: NettyConnection,
+    host:       String,
+    sslMode:    se.oyabun.aelv.netty.SslMode,
+) {
+    if (sslMode is se.oyabun.aelv.netty.SslMode.Disable) return
+
+    // SSLRequest: 4-byte length (8) + 4-byte magic (80877103)
+    val allocator = connection.channel.alloc()
+    val buf = allocator.buffer(8)
+    buf.writeInt(8)
+    buf.writeInt(80877103)
+    connection.write(buf).await()
+
+    val response = connection.readRawByte()
+
+    when {
+        response == 'S'.code.toByte() ->
+            connection.upgradeTls(sslMode, host)
+        response == 'N'.code.toByte() && sslMode is se.oyabun.aelv.netty.SslMode.Prefer ->
+            Unit // fall back to plain
+        else -> throw MinamotoException.TlsFailed(
+            "server declined TLS (response: '${response.toInt().toChar()}') but mode $sslMode requires it"
+        )
+    }
 }

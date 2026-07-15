@@ -85,6 +85,9 @@ internal sealed interface FrontendMessage {
         val secretKey: Int,
     ) : FrontendMessage
 
+    /** Requests TLS upgrade. Server responds with 'S' (supported) or 'N' (not supported). */
+    data object SSLRequest : FrontendMessage
+
     /** Terminates the connection gracefully. */
     data object Terminate : FrontendMessage
 

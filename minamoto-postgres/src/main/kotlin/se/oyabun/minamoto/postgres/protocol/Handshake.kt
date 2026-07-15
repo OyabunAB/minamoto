@@ -49,16 +49,31 @@ import javax.crypto.SecretKeyFactory
  * Throws [MinamotoException.InvalidState] on unexpected message types.
  */
 internal suspend fun PostgresConnection.handshake(
-    user:     String,
-    password: String,
-    database: String,
+    user:                            String,
+    password:                        String,
+    database:                        String,
+    applicationName:                 String                = "minamoto",
+    searchPath:                      List<String>          = emptyList(),
+    timezone:                        String?               = null,
+    statementTimeout:                kotlin.time.Duration? = null,
+    lockTimeout:                     kotlin.time.Duration? = null,
+    idleInTransactionSessionTimeout: kotlin.time.Duration? = null,
 ): KeyData {
     val log = Logging.of<PostgresConnection>()
     log.protocol.handshakeStarted(id)
 
     // Step 1 — send startup, wait for auth type
     val authMessage = exchange(
-        messages  = listOf(StartupMessage(user, database)),
+        messages  = listOf(StartupMessage(
+            user                            = user,
+            database                        = database,
+            applicationName                 = applicationName,
+            searchPath                      = searchPath,
+            timezone                        = timezone,
+            statementTimeout                = statementTimeout,
+            lockTimeout                     = lockTimeout,
+            idleInTransactionSessionTimeout = idleInTransactionSessionTimeout,
+        )),
         takeUntil = { it is Authentication.Ok || it is Authentication.MD5Password ||
                       it is Authentication.CleartextPassword || it is Authentication.SASL ||
                       it is ErrorResponse },

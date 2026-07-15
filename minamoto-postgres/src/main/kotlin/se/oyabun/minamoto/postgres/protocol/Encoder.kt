@@ -101,12 +101,28 @@ internal object MessageEncoder {
         val startIndex = buffer.writerIndex()
         buffer.writeInt(0) // length placeholder
         buffer.writeInt(PROTOCOL_VERSION)
-        buffer.writeCString("user")
-        buffer.writeCString(message.user)
-        buffer.writeCString("database")
-        buffer.writeCString(message.database)
-        buffer.writeCString("application_name")
-        buffer.writeCString(message.applicationName)
+        buffer.writeCString("user");              buffer.writeCString(message.user)
+        buffer.writeCString("database");          buffer.writeCString(message.database)
+        buffer.writeCString("application_name");  buffer.writeCString(message.applicationName)
+        if (message.searchPath.isNotEmpty()) {
+            buffer.writeCString("search_path")
+            buffer.writeCString(message.searchPath.joinToString(","))
+        }
+        message.timezone?.let {
+            buffer.writeCString("timezone"); buffer.writeCString(it)
+        }
+        message.statementTimeout?.let {
+            buffer.writeCString("statement_timeout")
+            buffer.writeCString(it.inWholeMilliseconds.toString())
+        }
+        message.lockTimeout?.let {
+            buffer.writeCString("lock_timeout")
+            buffer.writeCString(it.inWholeMilliseconds.toString())
+        }
+        message.idleInTransactionSessionTimeout?.let {
+            buffer.writeCString("idle_in_transaction_session_timeout")
+            buffer.writeCString(it.inWholeMilliseconds.toString())
+        }
         buffer.writeByte(0)
         buffer.setInt(startIndex, buffer.writerIndex() - startIndex)
         return buffer

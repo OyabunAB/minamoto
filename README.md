@@ -43,40 +43,45 @@ dependencies {
 ## Quick start
 
 ```kotlin
-val db: Database = PostgresDatabase(
-    PostgresConnectionFactory(host = "localhost", port = 5432, database = "mydb", user = "myuser", password = "secret"),
-    MinamotoPool(minSize = 2, maxSize = 10)
+val database = PostgresDatabase(
+    ConnectionConfig(
+        host     = "localhost",
+        port     = 5432,
+        user     = "myuser",
+        password = "secret",
+        database = "mydb",
+        sslMode  = SslMode.Prefer,
+    )
 )
+val pool = database.pool()
 
-// Single row
-val user: User = db.query("SELECT id, name FROM users WHERE id = :id")
-    .bind("id" to 42)
-    .single { row -> User(row.int("id"), row.string("name")) }
-    .get()
+// autocommit — connection acquired per call
+pool {
+    database.query("SELECT id, name FROM users WHERE id = :id")
+        .bind("id" to 42)
+        .single()
+        .map { row -> User(row.get<Int>("id"), row.get<String>("name")) }
+        .await().getOrThrow()
+}
 
-// Multiple rows
-val users: List<User> = db.query("SELECT id, name FROM users WHERE active = :active")
-    .bind("active" to true)
-    .multiple { row -> User(row.int("id"), row.string("name")) }
-    .toList()
-    .get()
+// transactional
+pool.transactionally<Unit> {
+    database.command("INSERT INTO orders (user_id, total) VALUES (:userId, :total)")
+        .bind("userId" to 42, "total" to 99.99)
+        .count()
+        .await().getOrThrow()
+    database.command("UPDATE users SET order_count = order_count + 1 WHERE id = :userId")
+        .bind("userId" to 42)
+        .count()
+        .await().getOrThrow()
+}
 
-// Optional row
-val maybeUser: Maybe<User> = db.query("SELECT id, name FROM users WHERE email = :email")
-    .bind("email" to "user@example.com")
-    .optional { row -> User(row.int("id"), row.string("name")) }
-
-// DML — affected row count
-val count: Long = db.command("UPDATE users SET active = :active WHERE id = :id")
-    .bind("active" to false, "id" to 42)
-    .count()
-    .get()
-
-// Side-effect — no return value
-db.effect("DELETE FROM sessions WHERE expires_at < :now")
-    .bind("now" to Instant.now())
-    .execute()
-    .await()
+// streaming — rows streamed with backpressure
+pool.transaction {
+    database.query("SELECT * FROM events WHERE stream_id = :id ORDER BY sequence")
+        .bind("id" to streamId)
+        .multiple()
+}
 ```
 
 ## Query API
@@ -145,8 +150,59 @@ Nullable variants are available for all accessors (`row.intOrNull("col")`, etc.)
 |---|---|---|
 | 1 | Codec layer, typed rows, named parameters, connection pool | Complete |
 | 2 | Transaction API — `transactionally`, savepoints, isolation levels | Complete |
+
 | 3 | Statement caching, named portals, `RETURNING` | Pending |
 | 4 | `LISTEN` / `NOTIFY` | Pending |
-| 5 | TLS (`SslMode.Prefer/Require/Verify/VerifyFull`), session parameters | Partial — TLS complete |
+| 5 | TLS (`SslMode`), session parameters (`searchPath`, `timezone`, `statementTimeout`, `lockTimeout`), SQLSTATE mapping, `CancelRequest`, `ParameterStatus`, `NoticeResponse` | Complete. SCRAM-SHA-256-PLUS pending. |
 
 Tested against PostgreSQL 13, 15, 17, and 18beta2.
+
+## ConnectionConfig fields
+
+| Field | Type | Default | Purpose |
+|---|---|---|---|
+| `host` | `String` | — | Server hostname or IP |
+| `port` | `Int` | `5432` | Server port |
+| `user` | `String` | — | Authentication username |
+| `password` | `String` | — | Authentication password |
+| `database` | `String` | `user` | Database name |
+| `sslMode` | `SslMode` | `SslMode.Prefer` | TLS policy |
+| `applicationName` | `String` | `"minamoto"` | Appears in `pg_stat_activity` |
+| `searchPath` | `List<String>` | `emptyList()` | Schema search order; empty means server default |
+| `timezone` | `String?` | `null` | Session timezone; null means server default |
+| `statementTimeout` | `Duration?` | `null` | Abort statements exceeding this duration |
+| `lockTimeout` | `Duration?` | `null` | Abort lock waits exceeding this duration |
+| `idleInTransactionSessionTimeout` | `Duration?` | `null` | Terminate sessions idle inside a transaction after this duration |
+| `defaultFetchSize` | `Int` | `50` | Maximum rows per `Execute` round-trip |
+
+## Error handling
+
+All driver exceptions extend `MinamotoException`. SQLSTATE codes are mapped to typed subclasses:
+
+| Exception type | SQLSTATE | Condition |
+|---|---|---|
+| `UniqueViolation` | `23505` | Unique constraint violation |
+| `ForeignKeyViolation` | `23503` | Foreign key constraint violation |
+| `NotNullViolation` | `23502` | Not-null constraint violation |
+| `CheckViolation` | `23514` | Check constraint violation |
+| `SerializationFailure` | `40001` | Serialization failure (retry-able) |
+| `ServerDeadlockDetected` | `40P01` | Deadlock detected by the server |
+| `QueryCancelled` | `57014` | Query cancelled via `CancelRequest` |
+| `SyntaxError` | `42601` | SQL syntax error |
+| `UndefinedTable` | `42P01` | Referenced table does not exist |
+| `UndefinedColumn` | `42703` | Referenced column does not exist |
+
+```kotlin
+try {
+    pool {
+        database.command("INSERT INTO users (email) VALUES (:email)")
+            .bind("email" to "duplicate@example.com")
+            .count()
+            .await().getOrThrow()
+    }
+} catch (e: MinamotoException.UniqueViolation) {
+    // handle duplicate
+} catch (e: MinamotoException) {
+    // handle everything else
+}
+```

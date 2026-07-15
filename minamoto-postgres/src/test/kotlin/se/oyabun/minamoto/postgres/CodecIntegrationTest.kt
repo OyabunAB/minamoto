@@ -237,18 +237,17 @@ class CodecIntegrationTest {
                 }
             },
 
-            dynamicTest("server error surfaces sqlState on QueryFailed") {
+            dynamicTest("server error surfaces UndefinedTable for unknown table") {
                 val error = Verify.that(
                     database!!.query("SELECT * FROM nonexistent_table_xyz")
                         .multiple()
                         .fold(emptyList<Any>()) { acc, _ -> acc },
                     context = PoolContext(pool!!),
                 ).completesWithError()
-                assertIs<MinamotoException.QueryFailed>(error)
-                assertEquals("42P01", error.sqlState)
+                assertIs<MinamotoException.UndefinedTable>(error)
             },
 
-            dynamicTest("unique constraint violation has sqlState 23505") {
+            dynamicTest("unique constraint violation surfaces UniqueViolation") {
                 val error = runBlocking {
                     runCatching {
                         pool!!.transactionally {
@@ -259,8 +258,7 @@ class CodecIntegrationTest {
                         }
                     }.exceptionOrNull()
                 }
-                assertIs<MinamotoException.QueryFailed>(error)
-                assertEquals("23505", error.sqlState)
+                assertIs<MinamotoException.UniqueViolation>(error)
             },
 
             dynamicTest("stop container") {

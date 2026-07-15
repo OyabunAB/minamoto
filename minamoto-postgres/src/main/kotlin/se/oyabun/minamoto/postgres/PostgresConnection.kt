@@ -39,12 +39,14 @@ import se.oyabun.minamoto.ValidationResult
 import se.oyabun.minamoto.postgres.codec.CodecRegistry
 import se.oyabun.minamoto.postgres.Parameter
 import se.oyabun.minamoto.postgres.protocol.BackendMessage
+import se.oyabun.minamoto.postgres.protocol.BackendMessage.KeyData
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.NoticeResponse
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.NotificationResponse
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.ParameterStatus
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.ReadyForQuery
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Bind
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.CancelRequest
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Close
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Execute
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Parse
@@ -76,6 +78,12 @@ internal class PostgresConnection(
     override var state: ConnectionState = ConnectionState.Idle
         private set
 
+    /** Server session parameters received via [ParameterStatus] messages. */
+    val serverParameters: java.util.concurrent.ConcurrentHashMap<String, String> = java.util.concurrent.ConcurrentHashMap()
+
+    /** Backend key data received during handshake — used to send [CancelRequest] on a separate connection. */
+    internal var backendKeyData: KeyData? = null
+
     private val writeMutex    = Mutex()
     private val conversations = ConcurrentLinkedQueue<Conversation>()
 
@@ -91,9 +99,15 @@ internal class PostgresConnection(
                 }
                 log.protocol.messageReceived(id, message::class.simpleName ?: "Unknown")
                 when (message) {
-                    is NoticeResponse       -> return@drain
+                    is NoticeResponse       -> {
+                        log.connection.notice(id, message.severity, message.message)
+                        return@drain
+                    }
                     is NotificationResponse -> return@drain
-                    is ParameterStatus      -> return@drain
+                    is ParameterStatus      -> {
+                        serverParameters[message.name] = message.value
+                        return@drain
+                    }
                     else                    -> { /* route to active conversation */ }
                 }
                 val conversation = conversations.peek()
@@ -213,6 +227,28 @@ internal class PostgresConnection(
             takeUntil = { it is ReadyForQuery },
         ).discard().await()
     }
+
+    /**
+     * Sends a [CancelRequest] for any query currently executing on this connection.
+     *
+     * Opens a fresh TCP connection to the server, sends the cancel, and closes it.
+     * This is a best-effort signal — the server may have already finished the query
+     * by the time the request arrives.
+     */
+    internal suspend fun cancel() {
+        val keyData = backendKeyData ?: return
+        val host    = connection.channel.remoteAddress().let { (it as? java.net.InetSocketAddress)?.hostString ?: return }
+        val port    = connection.channel.remoteAddress().let { (it as? java.net.InetSocketAddress)?.port ?: return }
+        try {
+            val cancelConnection = transport.connect(host, port).await().rightOrThrow()
+            cancelConnection.write(
+                MessageEncoder.encode(CancelRequest(keyData.processId, keyData.secretKey), allocator)
+            ).await()
+            cancelConnection.channel.close().sync()
+        } catch (_: Exception) {
+            log.connection.invalidState(id, "cancel request failed — server may have already completed the query")
+        }
+    }
 }
 
 internal data class Conversation(
@@ -221,14 +257,25 @@ internal data class Conversation(
 )
 
 data class ConnectionConfig(
-    val host:             String,
-    val port:             Int    = 5432,
-    val user:             String,
-    val password:         String,
-    val database:         String = user,
-    val sslMode:          se.oyabun.aelv.netty.SslMode = se.oyabun.aelv.netty.SslMode.Prefer,
+    val host:                              String,
+    val port:                              Int                                   = 5432,
+    val user:                              String,
+    val password:                          String,
+    val database:                          String                                = user,
+    val sslMode:                           se.oyabun.aelv.netty.SslMode         = se.oyabun.aelv.netty.SslMode.Prefer,
+    val applicationName:                   String                                = "minamoto",
+    /** Schema search order — sent as `search_path`. Empty means server default. */
+    val searchPath:                        List<String>                          = emptyList(),
+    /** Session timezone — sent as `timezone`. Null means server default. */
+    val timezone:                          String?                               = null,
+    /** Aborts any statement taking longer than this — sent as `statement_timeout` in milliseconds. */
+    val statementTimeout:                  kotlin.time.Duration?                 = null,
+    /** Aborts waiting for a lock after this duration — sent as `lock_timeout` in milliseconds. */
+    val lockTimeout:                       kotlin.time.Duration?                 = null,
+    /** Terminates sessions idle inside a transaction after this duration — sent as `idle_in_transaction_session_timeout`. */
+    val idleInTransactionSessionTimeout:   kotlin.time.Duration?                 = null,
     /** Controls the PGwire `Execute.maxRows` per round-trip. 50 means 50 rows per Execute → PortalSuspended → next Execute cycle. Increase for large result sets to reduce round-trips. */
-    val defaultFetchSize: Int    = 50,
+    val defaultFetchSize:                  Int                                   = 50,
 )
 
 class PostgresConnectionFactory(
@@ -254,7 +301,17 @@ class PostgresConnectionFactory(
             transport  = transport,
             registry   = registry,
         )
-        connection.handshake(config.user, config.password, config.database)
+        connection.backendKeyData = connection.handshake(
+            user                            = config.user,
+            password                        = config.password,
+            database                        = config.database,
+            applicationName                 = config.applicationName,
+            searchPath                      = config.searchPath,
+            timezone                        = config.timezone,
+            statementTimeout                = config.statementTimeout,
+            lockTimeout                     = config.lockTimeout,
+            idleInTransactionSessionTimeout = config.idleInTransactionSessionTimeout,
+        )
         return connection
     }
 

@@ -32,11 +32,14 @@ internal class Log(private val slf4j: Slf4jLogger) {
     val pool       = Pool()
 
     inner class Connection {
-        fun created(id: ConnectionId)                     = slf4j.debug { "connection created [$id]" }
-        fun closed(id: ConnectionId)                      = slf4j.debug { "connection closed [$id]" }
-        fun closing(id: ConnectionId)                     = slf4j.debug { "connection closing [$id]" }
-        fun error(id: ConnectionId, cause: Throwable)     = slf4j.error(cause) { "connection error [$id]" }
-        fun invalidState(id: ConnectionId, text: String)   = slf4j.warn { "invalid state [$id]: $text" }
+        fun created(id: ConnectionId)                                = slf4j.debug { "connection created [$id]" }
+        fun closed(id: ConnectionId)                                 = slf4j.debug { "connection closed [$id]" }
+        fun closing(id: ConnectionId)                                = slf4j.debug { "connection closing [$id]" }
+        fun error(id: ConnectionId, cause: Throwable)                = slf4j.error(cause) { "connection error [$id]" }
+        fun invalidState(id: ConnectionId, text: String)             = slf4j.warn { "invalid state [$id]: $text" }
+        /** Server notice — severity is the PG-reported level (NOTICE, WARNING, etc.). */
+        fun notice(id: ConnectionId, severity: String, message: String) =
+            slf4j.warn { "server notice [$id] $severity: $message" }
     }
 
     inner class Protocol {

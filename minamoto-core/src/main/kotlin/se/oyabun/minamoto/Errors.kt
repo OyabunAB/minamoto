@@ -75,6 +75,64 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
         cause:            Throwable? = null,
     ) : MinamotoException(message, cause)
 
+    /** Unique constraint violation — SQLSTATE 23505. */
+    class UniqueViolation(
+        message:      String,
+        val sqlState: String,
+        val detail:   String = "",
+        val hint:     String = "",
+    ) : MinamotoException(message)
+
+    /** Foreign key constraint violation — SQLSTATE 23503. */
+    class ForeignKeyViolation(
+        message:      String,
+        val sqlState: String,
+        val detail:   String = "",
+        val hint:     String = "",
+    ) : MinamotoException(message)
+
+    /** Not-null constraint violation — SQLSTATE 23502. */
+    class NotNullViolation(
+        message:      String,
+        val sqlState: String,
+        val detail:   String = "",
+    ) : MinamotoException(message)
+
+    /** Check constraint violation — SQLSTATE 23514. */
+    class CheckViolation(
+        message:      String,
+        val sqlState: String,
+        val detail:   String = "",
+    ) : MinamotoException(message)
+
+    /**
+     * Serialization failure — SQLSTATE 40001.
+     *
+     * The transaction must be retried from the beginning. Occurs under SERIALIZABLE
+     * isolation when concurrent transactions conflict.
+     */
+    class SerializationFailure(message: String) : MinamotoException(message)
+
+    /**
+     * Deadlock detected — SQLSTATE 40P01.
+     *
+     * PostgreSQL chose this transaction as the deadlock victim. The transaction
+     * must be retried.
+     */
+    class ServerDeadlockDetected(message: String) : MinamotoException(message)
+
+    /** Query cancelled by the client — SQLSTATE 57014. */
+    class QueryCancelled(message: String) : MinamotoException(message)
+
+    /** Syntax error in the SQL statement — SQLSTATE 42601. */
+    class SyntaxError(message: String, val detail: String = "") : MinamotoException(message)
+
+    /** Undefined table or view — SQLSTATE 42P01. */
+    class UndefinedTable(message: String) : MinamotoException(message)
+
+    /** Undefined column — SQLSTATE 42703. */
+    class UndefinedColumn(message: String) : MinamotoException(message)
+
     /** A transaction could not be committed. */
     class CommitFailed(message: String, cause: Throwable? = null) :
         MinamotoException(message, cause)

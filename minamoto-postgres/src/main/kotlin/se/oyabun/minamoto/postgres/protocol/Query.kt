@@ -171,10 +171,22 @@ private fun PostgresConnection.buildRow(
     return PostgresRow(columns, registry)
 }
 
-private fun ErrorResponse.asException() = MinamotoException.QueryFailed(
-    message  = message,
-    sqlState = sqlState,
-    severity = severity,
-    detail   = detail,
-    hint     = hint,
-)
+private fun ErrorResponse.asException(): MinamotoException = when (sqlState) {
+    "23505" -> MinamotoException.UniqueViolation(message, sqlState, detail, hint)
+    "23503" -> MinamotoException.ForeignKeyViolation(message, sqlState, detail, hint)
+    "23502" -> MinamotoException.NotNullViolation(message, sqlState, detail)
+    "23514" -> MinamotoException.CheckViolation(message, sqlState, detail)
+    "40001" -> MinamotoException.SerializationFailure(message)
+    "40P01" -> MinamotoException.ServerDeadlockDetected(message)
+    "57014" -> MinamotoException.QueryCancelled(message)
+    "42601" -> MinamotoException.SyntaxError(message, detail)
+    "42P01" -> MinamotoException.UndefinedTable(message)
+    "42703" -> MinamotoException.UndefinedColumn(message)
+    else    -> MinamotoException.QueryFailed(
+        message  = message,
+        sqlState = sqlState,
+        severity = severity,
+        detail   = detail,
+        hint     = hint,
+    )
+}

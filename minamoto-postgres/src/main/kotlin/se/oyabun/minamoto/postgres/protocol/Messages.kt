@@ -21,11 +21,27 @@ import se.oyabun.minamoto.postgres.Parameters
 
 internal sealed interface FrontendMessage {
 
-    /** Initiates a connection. Sent once before authentication. */
+    /**
+     * Initiates a connection. Sent once before authentication, carrying all session
+     * parameters as startup key-value pairs. Parameters set here take effect for the
+     * lifetime of the session without requiring a subsequent `SET` command.
+     *
+     * To change a parameter after connect, issue an explicit `SET` SQL command;
+     * the server will send a [BackendMessage.ParameterStatus] reflecting the new value.
+     *
+     * [searchPath] is sent as `search_path`, with schemas joined by commas.
+     * [statementTimeout], [lockTimeout], and [idleInTransactionSessionTimeout] are sent
+     * in milliseconds as required by the PostgreSQL GUC interface.
+     */
     data class StartupMessage(
-        val user:            String,
-        val database:        String,
-        val applicationName: String = "minamoto",
+        val user:                            String,
+        val database:                        String,
+        val applicationName:                 String               = "minamoto",
+        val searchPath:                      List<String>         = emptyList(),
+        val timezone:                        String?              = null,
+        val statementTimeout:                kotlin.time.Duration? = null,
+        val lockTimeout:                     kotlin.time.Duration? = null,
+        val idleInTransactionSessionTimeout: kotlin.time.Duration? = null,
     ) : FrontendMessage
 
     /** MD5 password response to [BackendMessage.AuthenticationMD5Password]. */

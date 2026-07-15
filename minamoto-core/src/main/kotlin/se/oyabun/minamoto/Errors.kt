@@ -35,16 +35,20 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
     class PoolTimeout(message: String) :
         MinamotoException(message)
 
+    /** The connection pool could not acquire a connection within [se.oyabun.minamoto.pool.PoolConfig.acquireTimeout]. */
+    class AcquireTimeout(timeout: kotlin.time.Duration) :
+        MinamotoException("pool acquire timed out after $timeout")
+
     /** A pooled connection failed validation before being returned to a caller. */
     class ValidationFailed(reason: String, cause: Throwable? = null) :
         MinamotoException("connection validation failed: $reason", cause)
 
     /**
      * Acquiring a connection would deadlock the current coroutine chain —
-     * all pool connections are already held by this chain.
+     * all connections from this pool are already held by this chain.
      */
-    class DeadlockPrevented(held: Int, poolSize: Int) :
-        MinamotoException("deadlock prevented: coroutine chain holds $held/$poolSize connections")
+    class DeadlockDetected(held: Int, poolSize: Int) :
+        MinamotoException("deadlock detected: coroutine chain holds $held/$poolSize connections from the same pool")
 
     /** The connection was closed unexpectedly. */
     class ConnectionClosed(message: String, cause: Throwable? = null) :

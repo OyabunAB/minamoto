@@ -150,30 +150,17 @@ interface BoundEffect {
 }
 
 /**
- * The top-level handle for interacting with the database.
+ * The top-level handle for building statements against a specific database.
  *
- * Named parameters in queries use `:name` syntax — bind them with Kotlin's `to` infix:
- * `"id" to 42`.
+ * Named parameters use `:name` syntax — bind them with Kotlin's `to` infix: `"id" to 42`.
  *
- * Connection acquisition and release is fully transparent — callers never hold a
- * connection directly.
- *
- * Transactions are scoped to a coroutine via [transaction]. Any operation executed
- * within a [transaction] block participates automatically.
- *
- * Nested [transaction] calls with [TransactionMode.Join] reuse the active transaction.
- * [TransactionMode.New] always starts a fresh transaction, becoming a savepoint if one
- * is already active.
+ * The returned builders are cold — no connection is acquired until the pipeline is subscribed.
+ * Connection acquisition happens via the [ConnectionContext] in the coroutine context at
+ * subscription time. Install one via [se.oyabun.minamoto.pool.MinamotoPool.transactionally]
+ * or [se.oyabun.minamoto.pool.MinamotoPool.invoke].
  */
 interface Database {
     fun query(statement: String):   QueryBuilder
     fun command(statement: String): CommandBuilder
     fun effect(statement: String):  EffectBuilder
-
-    /** If [block] throws, the transaction is automatically rolled back before the exception propagates to the caller. */
-    suspend fun <T> transaction(
-        mode:       TransactionMode       = TransactionMode.Join,
-        definition: TransactionDefinition = TransactionDefinition(),
-        block:      suspend () -> T,
-    ): T
 }

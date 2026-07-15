@@ -1,26 +1,22 @@
 package se.oyabun.minamoto.postgres
 
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.DynamicContainer.dynamicContainer
 import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
-import se.oyabun.aelv.One
-import se.oyabun.aelv.Verify
 import se.oyabun.aelv.await
-import se.oyabun.aelv.*
-import se.oyabun.aelv.map
-import se.oyabun.aelv.netty.NettyTransport
+import se.oyabun.aelv.fold
 import se.oyabun.aelv.rightOrThrow
-import se.oyabun.minamoto.ConnectionId
+import se.oyabun.minamoto.ConnectionAcquireResult
 import se.oyabun.minamoto.ConnectionState
+import se.oyabun.minamoto.Row
 import se.oyabun.minamoto.ValidationResult
-import se.oyabun.minamoto.postgres.protocol.handshake
-import se.oyabun.minamoto.postgres.query
-import se.oyabun.minamoto.postgres.get
+import se.oyabun.minamoto.pool.PoolConfig
+import se.oyabun.minamoto.pool.ValidationQuery
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
-import kotlin.time.Duration.Companion.seconds
 
 class PostgresConnectionTest {
 
@@ -33,18 +29,19 @@ class PostgresConnectionTest {
         )
     }
 
-    private fun connect(postgres: PostgreSQLContainer): One<PostgresConnection> =
-        One.defer {
-            val transport       = NettyTransport()
-            val nettyConnection = transport.connect(postgres.host, postgres.firstMappedPort).await().rightOrThrow()
-            val connection      = PostgresConnection(
-                id         = ConnectionId(System.nanoTime()),
-                connection = nettyConnection,
-                transport  = transport,
+    private fun connectWithPool(postgres: PostgreSQLContainer): Pair<PostgresDatabase, se.oyabun.minamoto.pool.MinamotoPool> {
+        val database = PostgresDatabase(
+            ConnectionConfig(
+                host     = postgres.host,
+                port     = postgres.firstMappedPort,
+                user     = postgres.username,
+                password = postgres.password,
+                database = postgres.databaseName,
             )
-            connection.handshake(postgres.username, postgres.password, postgres.databaseName)
-            connection
-        }
+        )
+        val pool = database.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 5, validation = ValidationQuery.None))
+        return Pair(database, pool)
+    }
 
     @TestFactory
     fun `connection tests across postgres versions`() = postgresImages.map { image ->
@@ -59,32 +56,39 @@ class PostgresConnectionTest {
 
             dynamicTest("connects and authenticates") {
                 postgres.start()
-                Verify.that(connect(postgres), timeout = 30.seconds)
-                    .assertNext { assertEquals(ConnectionState.Idle, it.state) }
-                    .completesNormally()
+                val (_, pool) = connectWithPool(postgres)
+                runBlocking {
+                    val result = pool.acquire()
+                    assertIs<ConnectionAcquireResult.Acquired>(result)
+                    val connection = (result as ConnectionAcquireResult.Acquired).connection as PostgresConnection
+                    assertEquals(ConnectionState.Idle, connection.state)
+                    pool.release(connection.id)
+                }
             },
 
             dynamicTest("ping returns valid") {
-                Verify.that(
-                    connect(postgres).map(transform = suspend { connection: PostgresConnection ->
-                        connection.ping().also { connection.close() }
-                    }),
-                    timeout = 30.seconds,
-                )
-                    .assertNext { assertIs<ValidationResult.Valid>(it) }
-                    .completesNormally()
+                val (_, pool) = connectWithPool(postgres)
+                runBlocking {
+                    val result = pool.acquire()
+                    assertIs<ConnectionAcquireResult.Acquired>(result)
+                    val connection = (result as ConnectionAcquireResult.Acquired).connection as PostgresConnection
+                    val ping = connection.ping()
+                    connection.close()
+                    assertIs<ValidationResult.Valid>(ping)
+                }
             },
 
             dynamicTest("query streams rows") {
-                Verify.that(
-                    connect(postgres).flatMapMany { connection ->
-                        connection.query("SELECT 'hello' AS greeting UNION ALL SELECT 'world'").bind().multiple()
-                            .map { row -> row.get<String>("greeting") }
-                    },
-                    timeout = 30.seconds,
-                )
-                    .emitsNext("hello", "world")
-                    .completesNormally()
+                val (database, pool) = connectWithPool(postgres)
+                val results = runBlocking {
+                    pool {
+                        database.query("SELECT 'hello' AS greeting UNION ALL SELECT 'world'")
+                            .bind().multiple()
+                            .fold(emptyList<String>()) { acc: List<String>, row: Row -> acc + row.get<String>("greeting") }
+                            .await().rightOrThrow()
+                    }
+                }
+                assertEquals(listOf("hello", "world"), results)
                 postgres.stop()
             },
         ))

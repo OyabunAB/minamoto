@@ -15,29 +15,64 @@
  */
 package se.oyabun.minamoto.postgres
 
-import se.oyabun.minamoto.Binding
+import kotlinx.coroutines.sync.Semaphore
 import se.oyabun.minamoto.Database
 import se.oyabun.minamoto.TransactionDefinition
-import se.oyabun.minamoto.TransactionMode
+import se.oyabun.minamoto.IsolationLevel
+import se.oyabun.minamoto.TransactionMutability
+import se.oyabun.minamoto.postgres.codec.CodecRegistry
+import se.oyabun.minamoto.pool.MinamotoPool
+import se.oyabun.minamoto.pool.PoolConfig
 
 /**
- * [Database] implementation for PostgreSQL backed by a single [PostgresConnection].
+ * Entry point for a PostgreSQL database.
  *
- * Named parameters use `:name` syntax — bind them with Kotlin's `to` infix: `"id" to 42`.
- * The SQL rewriter replaces `:name` with Postgres positional parameters (`$1`, `$2`, ...)
- * at bind time. Cast syntax (`::text`) is preserved.
+ * Holds connection configuration and a shared [connectionBudget] that enforces the total
+ * live connection ceiling across all pools created from this instance. The budget prevents
+ * collective pool over-subscription beyond [maxConnections].
  *
- * Transaction support is not yet implemented — [transaction] throws [UnsupportedOperationException].
+ * Call [pool] to create a [MinamotoPool] backed by this database. Multiple pools may be
+ * created (e.g. one for writes, one for reads) — they all draw from the same budget.
  */
-class PostgresDatabase internal constructor(internal val connection: PostgresConnection) : Database {
+class PostgresDatabase(
+    private val config:         ConnectionConfig,
+    private val maxConnections: Int          = 90,
+    private val registry:       CodecRegistry = CodecRegistry(),
+) : Database {
 
-    override fun query(statement: String)   = connection.query(statement)
-    override fun command(statement: String) = connection.command(statement)
-    override fun effect(statement: String)  = connection.effect(statement)
+    private val connectionBudget = Semaphore(maxConnections)
 
-    override suspend fun <T> transaction(
-        mode:       TransactionMode,
-        definition: TransactionDefinition,
-        block:      suspend () -> T,
-    ): T = throw UnsupportedOperationException("Transaction support not yet implemented — Phase 2")
+    /**
+     * Creates a [MinamotoPool] backed by this database.
+     *
+     * All pools share [connectionBudget] — the total live connections across all pools
+     * will never exceed [maxConnections].
+     */
+    fun pool(poolConfig: PoolConfig = PoolConfig()): MinamotoPool =
+        MinamotoPool(
+            config           = poolConfig,
+            factory          = PostgresConnectionFactory(config, registry),
+            connectionBudget = connectionBudget,
+        )
+
+    override fun query(statement: String)   = PostgresQuery(registry, statement)
+    override fun command(statement: String) = PostgresCommand(registry, statement)
+    override fun effect(statement: String)  = PostgresEffect(registry, statement)
+}
+
+/** Builds the `BEGIN` SQL statement from a [TransactionDefinition]. */
+internal fun TransactionDefinition.toBeginSql(): String = buildString {
+    append("BEGIN")
+    append(" ISOLATION LEVEL ")
+    append(when (isolation) {
+        IsolationLevel.ReadUncommitted -> "READ UNCOMMITTED"
+        IsolationLevel.ReadCommitted   -> "READ COMMITTED"
+        IsolationLevel.RepeatableRead  -> "REPEATABLE READ"
+        IsolationLevel.Serializable    -> "SERIALIZABLE"
+    })
+    append(when (mutability) {
+        TransactionMutability.ReadWrite -> " READ WRITE"
+        TransactionMutability.ReadOnly  -> " READ ONLY"
+    })
+    if (deferrable) append(" DEFERRABLE")
 }

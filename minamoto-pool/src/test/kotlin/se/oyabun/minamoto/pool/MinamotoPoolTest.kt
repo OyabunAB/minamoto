@@ -49,6 +49,12 @@ class MinamotoPoolTest {
                 override suspend fun ping()  = if (healthy) ValidationResult.Valid
                                                else ValidationResult.Invalid("unhealthy")
                 override suspend fun close() = onDestroy()
+                override suspend fun begin(definition: se.oyabun.minamoto.TransactionDefinition) = Unit
+                override suspend fun commit() = Unit
+                override suspend fun rollback() = Unit
+                override suspend fun savepoint(id: se.oyabun.minamoto.SavepointId) = Unit
+                override suspend fun releaseSavepoint(id: se.oyabun.minamoto.SavepointId) = Unit
+                override suspend fun rollbackToSavepoint(id: se.oyabun.minamoto.SavepointId) = Unit
             }
         }
         override suspend fun validate(connection: Connection) = connection.ping()
@@ -100,7 +106,7 @@ class MinamotoPoolTest {
         withTimeout(5.seconds) {
             val pool   = pool()
             Thread.sleep(50)
-            val result = pool.acquire()
+            val result = pool.acquireSlot()
             assertIs<AcquireResult.Acquired>(result)
             pool.close()
         }
@@ -111,10 +117,10 @@ class MinamotoPoolTest {
         withTimeout(5.seconds) {
             val pool  = pool(maxSize = 1, initialSize = 1)
             Thread.sleep(50)
-            val first = pool.acquire() as AcquireResult.Acquired
+            val first = pool.acquireSlot() as AcquireResult.Acquired
             pool.release(first.slot.id)
 
-            val second = pool.acquire()
+            val second = pool.acquireSlot()
             assertIs<AcquireResult.Acquired>(second)
             assertEquals(first.slot.id, (second as AcquireResult.Acquired).slot.id)
             pool.close()
@@ -126,9 +132,9 @@ class MinamotoPoolTest {
         withTimeout(5.seconds) {
             val pool = pool(maxSize = 1, initialSize = 1, acquireTimeout = 100.milliseconds)
             Thread.sleep(50)
-            pool.acquire()
+            pool.acquireSlot()
 
-            val result = pool.acquire()
+            val result = pool.acquireSlot()
             assertIs<AcquireResult.TimedOut>(result)
             pool.close()
         }
@@ -146,7 +152,7 @@ class MinamotoPoolTest {
             )
             Thread.sleep(50)
 
-            val result = pool.acquire() as AcquireResult.Acquired
+            val result = pool.acquireSlot() as AcquireResult.Acquired
             pool.invalidate(result.slot.id)
             Thread.sleep(50)
 
@@ -162,7 +168,7 @@ class MinamotoPoolTest {
             var fired = false
             val pool  = pool(postAllocate = ConnectionHook.Action { fired = true })
             Thread.sleep(50)
-            pool.acquire()
+            pool.acquireSlot()
             pool.close()
 
             assertTrue(fired)
@@ -181,7 +187,7 @@ class MinamotoPoolTest {
             )
             Thread.sleep(50)
 
-            assertFailsWith<MinamotoException.ConnectionLost> { pool.acquire() }
+            assertFailsWith<MinamotoException.ConnectionLost> { pool.acquireSlot() }
             assertEquals(1, destroyed)
             pool.close()
         }
@@ -193,7 +199,7 @@ class MinamotoPoolTest {
             var fired = false
             val pool  = pool(preRelease = ConnectionHook.Action { fired = true })
             Thread.sleep(50)
-            val result = pool.acquire() as AcquireResult.Acquired
+            val result = pool.acquireSlot() as AcquireResult.Acquired
             pool.release(result.slot.id)
             pool.close()
 
@@ -212,7 +218,7 @@ class MinamotoPoolTest {
                 preRelease = ConnectionHook.Action { throw RuntimeException("hook failure") },
             )
             Thread.sleep(50)
-            val result = pool.acquire() as AcquireResult.Acquired
+            val result = pool.acquireSlot() as AcquireResult.Acquired
             pool.release(result.slot.id)
             Thread.sleep(50)
 
@@ -252,7 +258,7 @@ class MinamotoPoolTest {
                 maxLifetime = 1.milliseconds,
             )
             Thread.sleep(50)
-            val result = pool.acquire() as AcquireResult.Acquired
+            val result = pool.acquireSlot() as AcquireResult.Acquired
             Thread.sleep(10)
             pool.release(result.slot.id)
             Thread.sleep(50)
@@ -273,7 +279,7 @@ class MinamotoPoolTest {
                 idleTimeout = 1.milliseconds,
             )
             Thread.sleep(50)
-            val result = pool.acquire() as AcquireResult.Acquired
+            val result = pool.acquireSlot() as AcquireResult.Acquired
             Thread.sleep(10)
             pool.release(result.slot.id)
             Thread.sleep(50)
@@ -296,6 +302,12 @@ class MinamotoPoolTest {
                         override suspend fun ping()  = if (healthy) ValidationResult.Valid
                                                        else ValidationResult.Invalid("bad")
                         override suspend fun close() {}
+                        override suspend fun begin(definition: se.oyabun.minamoto.TransactionDefinition) = Unit
+                        override suspend fun commit() = Unit
+                        override suspend fun rollback() = Unit
+                        override suspend fun savepoint(id: se.oyabun.minamoto.SavepointId) = Unit
+                        override suspend fun releaseSavepoint(id: se.oyabun.minamoto.SavepointId) = Unit
+                        override suspend fun rollbackToSavepoint(id: se.oyabun.minamoto.SavepointId) = Unit
                     }
                 }
                 override suspend fun validate(connection: Connection) = connection.ping()
@@ -304,7 +316,7 @@ class MinamotoPoolTest {
             val pool = pool(factory = factory, validation = ValidationQuery.Local, maxSize = 2)
             Thread.sleep(50)
 
-            val result = pool.acquire()
+            val result = pool.acquireSlot()
             assertIs<AcquireResult.Acquired>(result)
             pool.close()
         }
@@ -319,7 +331,7 @@ class MinamotoPoolTest {
             )
             Thread.sleep(100)
 
-            val result = pool.acquire()
+            val result = pool.acquireSlot()
             assertIs<AcquireResult.Acquired>(result)
             pool.close()
         }
@@ -350,7 +362,7 @@ class MinamotoPoolTest {
             assertEquals(2, pool.statistics.idle)
             assertEquals(0, pool.statistics.acquired)
 
-            val slot = pool.acquire() as AcquireResult.Acquired
+            val slot = pool.acquireSlot() as AcquireResult.Acquired
             assertEquals(1, pool.statistics.idle)
             assertEquals(1, pool.statistics.acquired)
 
@@ -365,11 +377,11 @@ class MinamotoPoolTest {
             val pool = pool(maxSize = 1, initialSize = 1, minIdle = 1)
             Thread.sleep(50)
 
-            val first = pool.acquire() as AcquireResult.Acquired
+            val first = pool.acquireSlot() as AcquireResult.Acquired
             pool.invalidate(first.slot.id)
             Thread.sleep(100)
 
-            val second = pool.acquire()
+            val second = pool.acquireSlot()
             assertIs<AcquireResult.Acquired>(second)
             pool.close()
         }

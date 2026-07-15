@@ -175,6 +175,42 @@ internal class PostgresConnection(
         log.connection.closed(id)
         state = ConnectionState.Closed
     }
+
+    override suspend fun begin(definition: se.oyabun.minamoto.TransactionDefinition) {
+        executeSimple(definition.toBeginSql())
+        state = ConnectionState.InTransaction
+    }
+
+    override suspend fun commit() {
+        executeSimple("COMMIT")
+        state = ConnectionState.Idle
+    }
+
+    override suspend fun rollback() {
+        executeSimple("ROLLBACK")
+        state = ConnectionState.Idle
+    }
+
+    override suspend fun savepoint(id: se.oyabun.minamoto.SavepointId) =
+        executeSimple("SAVEPOINT ${id.value}")
+
+    override suspend fun releaseSavepoint(id: se.oyabun.minamoto.SavepointId) =
+        executeSimple("RELEASE SAVEPOINT ${id.value}")
+
+    override suspend fun rollbackToSavepoint(id: se.oyabun.minamoto.SavepointId) =
+        executeSimple("ROLLBACK TO SAVEPOINT ${id.value}")
+
+    private suspend fun executeSimple(sql: String) {
+        exchange(
+            messages = listOf(
+                Parse("", sql),
+                Bind("", "", emptyList<Parameter>()),
+                Execute("", 0),
+                Sync,
+            ),
+            takeUntil = { it is ReadyForQuery },
+        ).discard().await()
+    }
 }
 
 internal data class Conversation(
@@ -193,7 +229,8 @@ data class ConnectionConfig(
 )
 
 class PostgresConnectionFactory(
-    private val config: ConnectionConfig,
+    private val config:   ConnectionConfig,
+    private val registry: se.oyabun.minamoto.postgres.codec.CodecRegistry = se.oyabun.minamoto.postgres.codec.CodecRegistry(),
 ) : se.oyabun.minamoto.ConnectionFactory {
 
     private val transport = NettyTransport()
@@ -207,6 +244,7 @@ class PostgresConnectionFactory(
             id         = ConnectionId(idCounter.incrementAndGet()),
             connection = nettyConnection,
             transport  = transport,
+            registry   = registry,
         )
         connection.handshake(config.user, config.password, config.database)
         return connection

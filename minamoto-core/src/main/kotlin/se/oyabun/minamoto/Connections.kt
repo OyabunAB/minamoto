@@ -27,6 +27,10 @@ value class TransactionId(val value: Long)
 @JvmInline
 value class SavepointId(val value: String)
 
+/** Stable identity for a pool instance — used to scope deadlock detection to a specific pool. */
+@JvmInline
+value class PoolId(val value: Long)
+
 sealed interface ConnectionState {
     data object Idle          : ConnectionState
     data object Acquired      : ConnectionState
@@ -130,6 +134,7 @@ sealed interface ConnectionStack {
 
     data class Frame(
         val connection:  ConnectionId,
+        val poolId:      PoolId,
         val transaction: TransactionBoundary,
         val parent:      ConnectionStack,
     ) : ConnectionStack
@@ -146,6 +151,24 @@ interface Connection {
     val state: ConnectionState
     suspend fun ping(): ValidationResult
     suspend fun close()
+
+    /** Send `BEGIN` with [definition]'s isolation level, mutability, and deferrable flag. */
+    suspend fun begin(definition: TransactionDefinition = TransactionDefinition())
+
+    /** Send `COMMIT`. */
+    suspend fun commit()
+
+    /** Send `ROLLBACK`. */
+    suspend fun rollback()
+
+    /** Send `SAVEPOINT [id]`. */
+    suspend fun savepoint(id: SavepointId)
+
+    /** Send `RELEASE SAVEPOINT [id]`. */
+    suspend fun releaseSavepoint(id: SavepointId)
+
+    /** Send `ROLLBACK TO SAVEPOINT [id]`. */
+    suspend fun rollbackToSavepoint(id: SavepointId)
 }
 
 /**
@@ -171,11 +194,13 @@ interface ConnectionFactory {
  * detection reliable under recursive flatMap pipelines.
  *
  * [stack] reflects the current transaction nesting level.
- * [held] is the shared reference-counted map of acquired connection IDs.
+ * [held] maps each acquired [ConnectionId] to the [PoolId] it was borrowed from.
+ * The pool uses this to detect when the current chain already holds all slots of its
+ * own pool — preventing a guaranteed self-deadlock before blocking on acquisition.
  */
 class ConnectionContext(
     val stack: ConnectionStack = ConnectionStack.Empty,
-    val held:  ConcurrentHashMap<ConnectionId, Int> = ConcurrentHashMap(),
+    val held:  ConcurrentHashMap<ConnectionId, PoolId> = ConcurrentHashMap(),
 ) : CoroutineContext.Element {
     override val key: CoroutineContext.Key<*> get() = ConnectionContext
 
@@ -191,7 +216,23 @@ class ConnectionContext(
         held,
     )
 
-    fun acquire(id: ConnectionId) { held.merge(id, 1, Int::plus) }
-    fun release(id: ConnectionId) { held.compute(id) { _, n -> if (n == null || n <= 1) null else n - 1 } }
-    fun holds(id: ConnectionId): Boolean = held.containsKey(id)
+    fun acquire(id: ConnectionId, poolId: PoolId) { held[id] = poolId }
+    fun release(id: ConnectionId)                 { held.remove(id) }
+    fun holds(id: ConnectionId): Boolean          = held.containsKey(id)
+
+    /** Number of connections currently held from [poolId] by this coroutine chain. */
+    fun heldCountFor(poolId: PoolId): Int = held.values.count { it == poolId }
+
+    /** The [ConnectionId] of the innermost active transaction on [stack], or null if none. */
+    fun activeConnectionId(): ConnectionId? = when (val s = stack) {
+        is ConnectionStack.Empty -> null
+        is ConnectionStack.Frame -> s.connection
+    }
+
+    /** The [PoolId] of the innermost active transaction on [stack], or null if none. */
+    fun activePoolId(): PoolId? = when (val s = stack) {
+        is ConnectionStack.Empty -> null
+        is ConnectionStack.Frame -> s.poolId
+    }
 }
+

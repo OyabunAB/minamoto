@@ -10,6 +10,7 @@ plugins {
 
 dependencies {
     api(project(":minamoto-core"))
+    api(project(":minamoto-pool"))
     implementation(libs.bundles.core.postgres)
     testImplementation(libs.bundles.test)
     testImplementation(libs.bundles.test.containers)

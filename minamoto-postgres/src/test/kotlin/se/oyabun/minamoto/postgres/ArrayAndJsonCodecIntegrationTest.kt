@@ -1,5 +1,6 @@
 package se.oyabun.minamoto.postgres
 
+import kotlinx.coroutines.runBlocking
 import kotlinx.datetime.Instant
 import kotlinx.datetime.LocalDateTime
 import kotlinx.serialization.Serializable
@@ -8,25 +9,18 @@ import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
-import se.oyabun.aelv.One
-import se.oyabun.aelv.Verify
 import se.oyabun.aelv.await
-import se.oyabun.aelv.flatMapMany
-import se.oyabun.aelv.map
-import se.oyabun.aelv.netty.NettyTransport
 import se.oyabun.aelv.rightOrThrow
-import se.oyabun.aelv.toMaybe
-import se.oyabun.aelv.toMany
-import se.oyabun.minamoto.ConnectionId
 import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.pool.MinamotoPool
+import se.oyabun.minamoto.pool.PoolConfig
+import se.oyabun.minamoto.pool.ValidationQuery
 import se.oyabun.minamoto.postgres.codec.CodecRegistry
-import se.oyabun.minamoto.postgres.protocol.handshake
 import java.math.BigDecimal
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
-import kotlin.time.Duration.Companion.seconds
 
 class ArrayAndJsonCodecIntegrationTest {
 
@@ -42,19 +36,23 @@ class ArrayAndJsonCodecIntegrationTest {
         data class Payload(val id: Int, val name: String)
     }
 
-    private fun connect(postgres: PostgreSQLContainer, registry: CodecRegistry = CodecRegistry()): One<PostgresDatabase> =
-        One.defer {
-            val transport          = NettyTransport()
-            val nettyConnection    = transport.connect(postgres.host, postgres.firstMappedPort).await().rightOrThrow()
-            val postgresConnection = PostgresConnection(
-                id         = ConnectionId(System.nanoTime()),
-                connection = nettyConnection,
-                transport  = transport,
-                registry   = registry,
-            )
-            postgresConnection.handshake(postgres.username, postgres.password, postgres.databaseName)
-            PostgresDatabase(postgresConnection)
-        }
+    private fun connectWithPool(
+        postgres: PostgreSQLContainer,
+        registry: CodecRegistry = CodecRegistry(),
+    ): Pair<PostgresDatabase, MinamotoPool> {
+        val database = PostgresDatabase(
+            config   = ConnectionConfig(
+                host     = postgres.host,
+                port     = postgres.firstMappedPort,
+                user     = postgres.username,
+                password = postgres.password,
+                database = postgres.databaseName,
+            ),
+            registry = registry,
+        )
+        val pool = database.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 5, validation = ValidationQuery.None))
+        return Pair(database, pool)
+    }
 
     private inline fun <reified T : Any> array(
         postgres:  PostgreSQLContainer,
@@ -63,16 +61,13 @@ class ArrayAndJsonCodecIntegrationTest {
         column:    String,
         noinline assertion: (T) -> Unit,
     ) = dynamicTest(label) {
-        val type = T::class
-        Verify.that(
-            connect(postgres).flatMapMany { database ->
-                database.query(statement).single().toMaybe().toMany()
-                    .map { row -> row.get(column, type) }
-            },
-            timeout = 30.seconds,
-        )
-            .assertNext { assertion(it) }
-            .completesNormally()
+        val (database, pool) = connectWithPool(postgres)
+        val value = runBlocking {
+            pool {
+                database.query(statement).single().await().rightOrThrow().get<T>(column)
+            }
+        }
+        assertion(value)
     }
 
     @TestFactory
@@ -134,102 +129,105 @@ class ArrayAndJsonCodecIntegrationTest {
             },
 
             dynamicTest("empty array round-trips as empty List") {
-                Verify.that(
-                    connect(postgres).flatMapMany { database ->
-                        database.query("SELECT ARRAY[]::int4[] AS v").single().toMaybe().toMany()
-                            .map { row -> row.get<List<*>>("v") }
-                    },
-                    timeout = 30.seconds,
-                ).assertNext { assertEquals(emptyList<Int>(), it) }.completesNormally()
+                val (database, pool) = connectWithPool(postgres)
+                runBlocking {
+                    pool {
+                        val row = database.query("SELECT ARRAY[]::int4[] AS v").single().await().rightOrThrow()
+                        assertEquals(emptyList<Int>(), row.get<List<*>>("v"))
+                    }
+                }
             },
 
             dynamicTest("single-element array round-trips") {
-                Verify.that(
-                    connect(postgres).flatMapMany { database ->
-                        database.query("SELECT ARRAY[42]::int4[] AS v").single().toMaybe().toMany()
-                            .map { row -> row.get<List<*>>("v") }
-                    },
-                    timeout = 30.seconds,
-                ).assertNext { assertEquals(listOf(42), it) }.completesNormally()
+                val (database, pool) = connectWithPool(postgres)
+                runBlocking {
+                    pool {
+                        val row = database.query("SELECT ARRAY[42]::int4[] AS v").single().await().rightOrThrow()
+                        assertEquals(listOf(42), row.get<List<*>>("v"))
+                    }
+                }
             },
 
             dynamicTest("null element in array throws CodecFailed") {
-                val error = Verify.that(
-                    connect(postgres).flatMapMany { database ->
-                        database.query("SELECT ARRAY[1, NULL, 3]::int4[] AS v").single().toMaybe().toMany()
-                            .map { row -> row.get<List<*>>("v") }
-                    },
-                    timeout = 30.seconds,
-                ).completesWithError()
+                val (database, pool) = connectWithPool(postgres)
+                val error = runBlocking {
+                    runCatching {
+                        pool {
+                            val row = database.query("SELECT ARRAY[1, NULL, 3]::int4[] AS v").single().await().rightOrThrow()
+                            row.get<List<*>>("v")
+                        }
+                    }.exceptionOrNull()
+                }
                 assertIs<MinamotoException.CodecFailed>(error)
             },
 
             dynamicTest("json column decoded as @Serializable data class") {
                 val registry = CodecRegistry()
                 registry.registerJson<Payload>()
-                Verify.that(
-                    connect(postgres, registry).flatMapMany { database ->
-                        database.query("SELECT '{\"id\":1,\"name\":\"walter\"}'::json AS v")
-                            .single().toMaybe().toMany()
-                            .map { row -> row.get<Payload>("v") }
-                    },
-                    timeout = 30.seconds,
-                ).assertNext { assertEquals(Payload(1, "walter"), it) }.completesNormally()
+                val (database, pool) = connectWithPool(postgres, registry)
+                runBlocking {
+                    pool {
+                        val row = database.query("SELECT '{\"id\":1,\"name\":\"walter\"}'::json AS v")
+                            .single().await().rightOrThrow()
+                        assertEquals(Payload(1, "walter"), row.get<Payload>("v"))
+                    }
+                }
             },
 
             dynamicTest("jsonb column decoded as @Serializable data class") {
                 val registry = CodecRegistry()
                 registry.registerJsonb<Payload>()
-                Verify.that(
-                    connect(postgres, registry).flatMapMany { database ->
-                        database.query("SELECT '{\"id\":2,\"name\":\"jesse\"}'::jsonb AS v")
-                            .single().toMaybe().toMany()
-                            .map { row -> row.get<Payload>("v") }
-                    },
-                    timeout = 30.seconds,
-                ).assertNext { assertEquals(Payload(2, "jesse"), it) }.completesNormally()
+                val (database, pool) = connectWithPool(postgres, registry)
+                runBlocking {
+                    pool {
+                        val row = database.query("SELECT '{\"id\":2,\"name\":\"jesse\"}'::jsonb AS v")
+                            .single().await().rightOrThrow()
+                        assertEquals(Payload(2, "jesse"), row.get<Payload>("v"))
+                    }
+                }
             },
 
             dynamicTest("@Serializable parameter encoded into json column") {
                 val registry = CodecRegistry()
                 registry.registerJson<Payload>()
                 val payload  = Payload(3, "skyler")
-                Verify.that(
-                    connect(postgres, registry).flatMapMany { database ->
-                        database.query("SELECT :v::json AS v")
+                val (database, pool) = connectWithPool(postgres, registry)
+                runBlocking {
+                    pool {
+                        val row = database.query("SELECT :v::json AS v")
                             .bind("v" to payload)
-                            .single().toMaybe().toMany()
-                            .map { row -> row.get<Payload>("v") }
-                    },
-                    timeout = 30.seconds,
-                ).assertNext { assertEquals(payload, it) }.completesNormally()
+                            .single().await().rightOrThrow()
+                        assertEquals(payload, row.get<Payload>("v"))
+                    }
+                }
             },
 
             dynamicTest("@Serializable parameter encoded into jsonb column") {
                 val registry = CodecRegistry()
                 registry.registerJsonb<Payload>()
                 val payload  = Payload(4, "hank")
-                Verify.that(
-                    connect(postgres, registry).flatMapMany { database ->
-                        database.query("SELECT :v::jsonb AS v")
+                val (database, pool) = connectWithPool(postgres, registry)
+                runBlocking {
+                    pool {
+                        val row = database.query("SELECT :v::jsonb AS v")
                             .bind("v" to payload)
-                            .single().toMaybe().toMany()
-                            .map { row -> row.get<Payload>("v") }
-                    },
-                    timeout = 30.seconds,
-                ).assertNext { assertEquals(payload, it) }.completesNormally()
+                            .single().await().rightOrThrow()
+                        assertEquals(payload, row.get<Payload>("v"))
+                    }
+                }
             },
 
             dynamicTest("json null column returns null via getOrNull") {
                 val registry = CodecRegistry()
                 registry.registerJson<Payload>()
-                Verify.that(
-                    connect(postgres, registry).flatMapMany { database ->
-                        database.query("SELECT NULL::json AS v")
-                            .single().toMaybe().toMany()
-                    },
-                    timeout = 30.seconds,
-                ).assertNext { row -> assertNull(row.getOrNull<Payload>("v")) }.completesNormally()
+                val (database, pool) = connectWithPool(postgres, registry)
+                runBlocking {
+                    pool {
+                        val row = database.query("SELECT NULL::json AS v")
+                            .single().await().rightOrThrow()
+                        assertNull(row.getOrNull<Payload>("v"))
+                    }
+                }
             },
 
             dynamicTest("stop container") { postgres.stop() },

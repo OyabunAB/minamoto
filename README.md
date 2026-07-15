@@ -144,9 +144,9 @@ Nullable variants are available for all accessors (`row.intOrNull("col")`, etc.)
 | Phase | Description | Status |
 |---|---|---|
 | 1 | Codec layer, typed rows, named parameters, connection pool | Complete |
-| 2 | Transaction API | Pending |
+| 2 | Transaction API — `transactionally`, savepoints, isolation levels | Complete |
 | 3 | Statement caching, named portals, `RETURNING` | Pending |
 | 4 | `LISTEN` / `NOTIFY` | Pending |
-| 5 | TLS, session parameters | Pending |
+| 5 | TLS (`SslMode.Prefer/Require/Verify/VerifyFull`), session parameters | Partial — TLS complete |
 
 Tested against PostgreSQL 13, 15, 17, and 18beta2.

@@ -20,29 +20,35 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.Maybe
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
-import se.oyabun.aelv.await
+import se.oyabun.aelv.discard
 import se.oyabun.aelv.firstMaybe
+import se.oyabun.aelv.flatMap
+import se.oyabun.aelv.doOnNext
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.flatMapNone
-import se.oyabun.aelv.getOrThrow
 import se.oyabun.aelv.or
 import se.oyabun.aelv.resource
+import se.oyabun.aelv.toMany
 import se.oyabun.minamoto.Binding
-import se.oyabun.minamoto.BoundCommand
-import se.oyabun.minamoto.BoundEffect
+import se.oyabun.minamoto.BoundModify
+import se.oyabun.minamoto.BoundRun
 import se.oyabun.minamoto.BoundQuery
-import se.oyabun.minamoto.CommandBuilder
+import se.oyabun.minamoto.ModifyBuilder
 import se.oyabun.minamoto.ConnectionAcquireResult
 import se.oyabun.minamoto.ConnectionContext
-import se.oyabun.minamoto.EffectBuilder
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.RunBuilder
+import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.QueryBuilder
 import se.oyabun.minamoto.Row
 import se.oyabun.minamoto.pool.ManagedPool
+import se.oyabun.minamoto.pool.AcquireResult
+import se.oyabun.minamoto.postgres.codec.CodecRegistry
 import se.oyabun.minamoto.postgres.protocol.executeCommand
 import se.oyabun.minamoto.postgres.protocol.executeEffect
 import se.oyabun.minamoto.postgres.protocol.executeQuery
+
+private val log = Logging.of<PostgresBoundQuery>()
 
 /**
  * A query with named parameters, ready to be bound.
@@ -52,7 +58,7 @@ import se.oyabun.minamoto.postgres.protocol.executeQuery
  * resolved connection.
  */
 class PostgresQuery internal constructor(
-    private val registry:  se.oyabun.minamoto.postgres.codec.CodecRegistry,
+    private val registry:  CodecRegistry,
     private val statement: String,
 ) : QueryBuilder {
     override fun bind(vararg bindings: Binding): PostgresBoundQuery =
@@ -62,16 +68,16 @@ class PostgresQuery internal constructor(
 /**
  * A command (INSERT / UPDATE / DELETE / DDL) with named parameters, ready to be bound.
  */
-class PostgresCommand internal constructor(
-    private val registry:  se.oyabun.minamoto.postgres.codec.CodecRegistry,
+class PostgresModify internal constructor(
+    private val registry:  CodecRegistry,
     private val statement: String,
-) : CommandBuilder {
-    override fun bind(vararg bindings: Binding): PostgresBoundCommand =
-        PostgresBoundCommand(registry, statement, bindings.toList())
+) : ModifyBuilder {
+    override fun bind(vararg bindings: Binding): PostgresBoundModify =
+        PostgresBoundModify(registry, statement, bindings.toList())
 }
 
 class PostgresBoundQuery internal constructor(
-    private val registry:  se.oyabun.minamoto.postgres.codec.CodecRegistry,
+    private val registry:  CodecRegistry,
     private val statement: String,
     private val bindings:  List<Binding>,
 ) : BoundQuery {
@@ -86,7 +92,7 @@ class PostgresBoundQuery internal constructor(
         withConnection(registry) { connection ->
             val (rewrittenSql, parameters) = rewriteAndEncode(statement, bindings, connection)
             connection.executeQuery(rewrittenSql, parameters)
-        }.firstMaybe().or { throw MinamotoException.QueryFailed(
+        }.firstMaybe().or { throw DatabaseException.QueryFailed(
             message  = "expected at least one row but got none",
             sqlState = "02000",
             severity = "ERROR",
@@ -99,11 +105,11 @@ class PostgresBoundQuery internal constructor(
         }.firstMaybe()
 }
 
-class PostgresBoundCommand internal constructor(
-    private val registry:  se.oyabun.minamoto.postgres.codec.CodecRegistry,
+class PostgresBoundModify internal constructor(
+    private val registry:  CodecRegistry,
     private val statement: String,
     private val bindings:  List<Binding>,
-) : BoundCommand {
+) : BoundModify {
 
     override fun count(): One<Long> =
         withConnectionOne(registry) { connection ->
@@ -112,19 +118,19 @@ class PostgresBoundCommand internal constructor(
         }
 }
 
-class PostgresEffect internal constructor(
-    private val registry:  se.oyabun.minamoto.postgres.codec.CodecRegistry,
+class PostgresRun internal constructor(
+    private val registry:  CodecRegistry,
     private val statement: String,
-) : EffectBuilder {
-    override fun bind(vararg bindings: Binding): PostgresBoundEffect =
-        PostgresBoundEffect(registry, statement, bindings.toList())
+) : RunBuilder {
+    override fun bind(vararg bindings: Binding): PostgresBoundRun =
+        PostgresBoundRun(registry, statement, bindings.toList())
 }
 
-class PostgresBoundEffect internal constructor(
-    private val registry:  se.oyabun.minamoto.postgres.codec.CodecRegistry,
+class PostgresBoundRun internal constructor(
+    private val registry:  CodecRegistry,
     private val statement: String,
     private val bindings:  List<Binding>,
-) : BoundEffect {
+) : BoundRun {
     override fun execute(): None<Unit> =
         withConnectionNone(registry) { connection ->
             val (rewrittenSql, parameters) = rewriteAndEncode(statement, bindings, connection)
@@ -139,98 +145,92 @@ class PostgresBoundEffect internal constructor(
  * directly — no acquire or release. Otherwise, a connection is borrowed from the [PoolContext]
  * pool and released when the pipeline terminates (normally, error, or cancellation).
  */
+private fun resolveSlot(pool: ManagedPool): One<Pair<PostgresConnection, ManagedPool?>> =
+    pool.acquireSlot().flatMap { result ->
+        when (result) {
+            is AcquireResult.Acquired          -> One.single(result.slot.connection as PostgresConnection to (pool as ManagedPool?))
+            is AcquireResult.TimedOut          -> One.error(DatabaseException.AcquireTimeout(pool.config.acquireTimeout))
+            is AcquireResult.DeadlockPrevented -> One.error(DatabaseException.DeadlockDetected(result.held, result.poolSize))
+        }
+    }.doOnNext { (conn: PostgresConnection, _: ManagedPool?) -> log.query.reusingConnection(conn.id) }
+
 private fun withConnection(
-    @Suppress("UNUSED_PARAMETER") registry: se.oyabun.minamoto.postgres.codec.CodecRegistry,
+    @Suppress("UNUSED_PARAMETER") registry: CodecRegistry,
     block: (PostgresConnection) -> Many<Row>,
 ): Many<Row> = Many.defer(factory = suspend {
     val context           = currentCoroutineContext()
     val connectionContext = context[ConnectionContext]
     val activeId          = connectionContext?.activeConnectionId()
-
     if (activeId != null) {
+        log.query.reusingConnection(activeId)
         val pool = context[PoolContext]?.pool as? ManagedPool
-            ?: throw MinamotoException.InvalidState("connection active in context but no ManagedPool found")
+            ?: return@defer Many.error(DatabaseException.InvalidState("connection active in context but no ManagedPool found"))
         val connection = pool.connectionFor(activeId) as? PostgresConnection
-            ?: throw MinamotoException.InvalidState("active connection ${activeId.value} not found in pool")
+            ?: return@defer Many.error(DatabaseException.InvalidState("active connection ${activeId.value} not found in pool"))
         block(connection)
     } else {
+        log.query.acquiringConnection()
         val pool = context[PoolContext]?.pool as? ManagedPool
-            ?: throw MinamotoException.InvalidState("no pool in context — use pool { } or pool.transactionally { }")
+            ?: return@defer Many.error(DatabaseException.InvalidState("no pool in context — use pool { } or pool.transactionally { }"))
         Many.resource(
-            acquire = {
-                when (val result = pool.acquireSlot()) {
-                    is se.oyabun.minamoto.pool.AcquireResult.Acquired          -> result.slot
-                    is se.oyabun.minamoto.pool.AcquireResult.TimedOut          -> throw MinamotoException.AcquireTimeout(pool.config.acquireTimeout)
-                    is se.oyabun.minamoto.pool.AcquireResult.DeadlockPrevented -> throw MinamotoException.DeadlockDetected(result.held, result.poolSize)
-                }
-            },
-            release = { slot, _ -> pool.release(slot.id) },
-            use     = { slot -> block(slot.connection as PostgresConnection) },
+            acquire = { resolveSlot(pool) },
+            release = { (connection, pool), _ -> if (pool != null) pool.release(connection.id) else None.complete<Nothing>() },
+            use     = { (connection, _) -> block(connection) },
         )
     }
 })
 
 private fun withConnectionOne(
-    @Suppress("UNUSED_PARAMETER") registry: se.oyabun.minamoto.postgres.codec.CodecRegistry,
+    @Suppress("UNUSED_PARAMETER") registry: CodecRegistry,
     block: (PostgresConnection) -> One<Long>,
-): One<Long> = One.defer {
+): One<Long> = Many.defer(factory = suspend {
     val context           = currentCoroutineContext()
     val connectionContext = context[ConnectionContext]
     val activeId          = connectionContext?.activeConnectionId()
-
     if (activeId != null) {
+        log.query.reusingConnection(activeId)
         val pool = context[PoolContext]?.pool as? ManagedPool
-            ?: throw MinamotoException.InvalidState("connection active in context but no ManagedPool found")
+            ?: return@defer Many.error(DatabaseException.InvalidState("connection active in context but no ManagedPool found"))
         val connection = pool.connectionFor(activeId) as? PostgresConnection
-            ?: throw MinamotoException.InvalidState("active connection ${activeId.value} not found in pool")
-        block(connection).await().getOrThrow()
+            ?: return@defer Many.error(DatabaseException.InvalidState("active connection ${activeId.value} not found in pool"))
+        block(connection).toMany()
     } else {
+        log.query.acquiringConnection()
         val pool = context[PoolContext]?.pool as? ManagedPool
-            ?: throw MinamotoException.InvalidState("no pool in context — use pool { } or pool.transactionally { }")
+            ?: return@defer Many.error(DatabaseException.InvalidState("no pool in context — use pool { } or pool.transactionally { }"))
         One.resource(
-            acquire = {
-                when (val result = pool.acquireSlot()) {
-                    is se.oyabun.minamoto.pool.AcquireResult.Acquired          -> result.slot
-                    is se.oyabun.minamoto.pool.AcquireResult.TimedOut          -> throw MinamotoException.AcquireTimeout(pool.config.acquireTimeout)
-                    is se.oyabun.minamoto.pool.AcquireResult.DeadlockPrevented -> throw MinamotoException.DeadlockDetected(result.held, result.poolSize)
-                }
-            },
-            release = { slot, _ -> pool.release(slot.id) },
-            use     = { slot -> block(slot.connection as PostgresConnection) },
-        ).await().getOrThrow()
+            acquire = { resolveSlot(pool) },
+            release = { (connection, pool), _ -> if (pool != null) pool.release(connection.id) else None.complete<Nothing>() },
+            use     = { (connection, _) -> block(connection) },
+        ).toMany()
     }
-}
+}).firstMaybe().or { throw DatabaseException.InvalidState("modify returned no count") }
 
 private fun withConnectionNone(
-    @Suppress("UNUSED_PARAMETER") registry: se.oyabun.minamoto.postgres.codec.CodecRegistry,
+    @Suppress("UNUSED_PARAMETER") registry: CodecRegistry,
     block: (PostgresConnection) -> None<Unit>,
-): None<Unit> = None.defer {
+): None<Unit> = Many.defer(factory = suspend {
     val context           = currentCoroutineContext()
     val connectionContext = context[ConnectionContext]
     val activeId          = connectionContext?.activeConnectionId()
-
     if (activeId != null) {
+        log.query.reusingConnection(activeId)
         val pool = context[PoolContext]?.pool as? ManagedPool
-            ?: throw MinamotoException.InvalidState("connection active in context but no ManagedPool found")
+            ?: return@defer Many.error(DatabaseException.InvalidState("connection active in context but no ManagedPool found"))
         val connection = pool.connectionFor(activeId) as? PostgresConnection
-            ?: throw MinamotoException.InvalidState("active connection ${activeId.value} not found in pool")
-        block(connection).await().getOrThrow()
+            ?: return@defer Many.error(DatabaseException.InvalidState("active connection ${activeId.value} not found in pool"))
+        block(connection).toMany()
     } else {
+        log.query.acquiringConnection()
         val pool = context[PoolContext]?.pool as? ManagedPool
-            ?: throw MinamotoException.InvalidState("no pool in context — use pool { } or pool.transactionally { }")
+            ?: return@defer Many.error(DatabaseException.InvalidState("no pool in context — use pool { } or pool.transactionally { }"))
         None.resource(
-            acquire = {
-                when (val result = pool.acquireSlot()) {
-                    is se.oyabun.minamoto.pool.AcquireResult.Acquired          -> result.slot
-                    is se.oyabun.minamoto.pool.AcquireResult.TimedOut          -> throw MinamotoException.AcquireTimeout(pool.config.acquireTimeout)
-                    is se.oyabun.minamoto.pool.AcquireResult.DeadlockPrevented -> throw MinamotoException.DeadlockDetected(result.held, result.poolSize)
-                }
-            },
-            release = { slot, _ -> pool.release(slot.id) },
-            use     = { slot -> block(slot.connection as PostgresConnection) },
-        ).await().getOrThrow()
+            acquire = { resolveSlot(pool) },
+            release = { (connection, pool), _ -> if (pool != null) pool.release(connection.id) else None.complete<Nothing>() },
+            use     = { (connection, _) -> block(connection) },
+        ).toMany()
     }
-}
+}).discard()
 
 /**
  * Rewrites `:name` parameters to Postgres `$n` positional parameters and encodes values.
@@ -310,10 +310,10 @@ internal fun rewriteAndEncode(
 /**
  * Encodes a named binding to a [Parameter].
  *
- * Passing `null` for [value] throws [MinamotoException.InvalidState] — use [Parameter.Undefined] to bind SQL NULL.
+ * Passing `null` for [value] throws [DatabaseException.InvalidState] — use [Parameter.Undefined] to bind SQL NULL.
  */
 private fun encodeBinding(name: String, value: Any?, connection: PostgresConnection): Parameter {
-    if (value == null) throw MinamotoException.InvalidState(
+    if (value == null) throw DatabaseException.InvalidState(
         "no binding provided for parameter :$name — use Parameter.Undefined for SQL NULL"
     )
     if (value is Parameter.Undefined) return Parameter.Undefined

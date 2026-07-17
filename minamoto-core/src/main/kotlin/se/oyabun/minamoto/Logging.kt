@@ -24,6 +24,7 @@ internal inline fun Slf4jLogger.info(msg: () -> String)  { if (isInfoEnabled)  i
 internal inline fun Slf4jLogger.warn(msg: () -> String)  { if (isWarnEnabled)  warn(msg())  }
 internal inline fun Slf4jLogger.warn(cause: Throwable, msg: () -> String) { if (isWarnEnabled) warn(msg(), cause) }
 internal inline fun Slf4jLogger.error(cause: Throwable, msg: () -> String) { if (isErrorEnabled) error(msg(), cause) }
+internal inline fun Slf4jLogger.debug(cause: Throwable, msg: () -> String) { if (isDebugEnabled) debug(msg(), cause) }
 
 internal object Logging {
     inline fun <reified T : Any> of(): Slf4jLogger = LoggerFactory.getLogger(T::class.java)

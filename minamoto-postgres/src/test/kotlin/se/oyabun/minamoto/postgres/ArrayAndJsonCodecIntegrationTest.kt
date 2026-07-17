@@ -1,17 +1,18 @@
 package se.oyabun.minamoto.postgres
 
-import kotlinx.coroutines.runBlocking
 import kotlinx.datetime.Instant
 import kotlinx.datetime.LocalDateTime
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.DynamicContainer.dynamicContainer
+import org.junit.jupiter.api.DynamicNode
 import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
-import se.oyabun.aelv.await
-import se.oyabun.aelv.rightOrThrow
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.aelv.Verify
+import se.oyabun.aelv.map
+import se.oyabun.minamoto.DatabaseException
+import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.pool.MinamotoPool
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
@@ -21,31 +22,37 @@ import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.time.Duration.Companion.seconds
 
 class ArrayAndJsonCodecIntegrationTest {
 
     companion object {
         val postgresImages = listOf(
-            "postgres:13-alpine@sha256:fb9065b6e3e213bdc07edd372a5b2a26245840b7fb65d1fd8b6700106d51805c",
-            "postgres:15-alpine@sha256:fceb6f86328c36f2438fae3b851b0cc57c4a7e69a58c866d9ce24281f2cf0c9c",
-            "postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609",
-            "postgres:18beta2-alpine@sha256:0164ef2cdce5fc6136d7de2cf9864bee88f593283608facace1e6460ba63ad0c",
+            "postgres:13-alpine",
+            "postgres:15-alpine",
+            "postgres:17-alpine",
+            "postgres:18beta2-alpine",
         )
 
         @Serializable
         data class Payload(val id: Int, val name: String)
     }
 
-    private fun connectWithPool(
-        postgres: PostgreSQLContainer,
-        registry: CodecRegistry = CodecRegistry(),
-    ): Pair<PostgresDatabase, MinamotoPool> {
+    @TestFactory
+    fun `array and JSON codec tests across postgres versions`() = postgresImages.map { image ->
+        val postgres = PostgreSQLContainer(
+            DockerImageName.parse(image).asCompatibleSubstituteFor("postgres")
+        ).withDatabaseName("testdb").withUsername("testuser").withPassword("testpass")
+        dynamicContainer(image, tests(postgres))
+    }
+
+    private fun connect(postgres: PostgreSQLContainer, registry: CodecRegistry = CodecRegistry()): Pair<PostgresDatabase, MinamotoPool> {
         val database = PostgresDatabase(
             config   = ConnectionConfig(
                 host     = postgres.host,
                 port     = postgres.firstMappedPort,
                 user     = postgres.username,
-                password = postgres.password,
+                password = { postgres.password },
                 database = postgres.databaseName,
             ),
             registry = registry,
@@ -54,184 +61,170 @@ class ArrayAndJsonCodecIntegrationTest {
         return Pair(database, pool)
     }
 
-    private inline fun <reified T : Any> array(
-        postgres:  PostgreSQLContainer,
-        label:     String,
-        statement: String,
-        column:    String,
-        noinline assertion: (T) -> Unit,
-    ) = dynamicTest(label) {
-        val (database, pool) = connectWithPool(postgres)
-        val value = runBlocking {
-            pool {
-                database.query(statement).single().await().rightOrThrow().get<T>(column)
-            }
-        }
-        assertion(value)
-    }
+    private fun tests(postgres: PostgreSQLContainer): List<DynamicNode> {
+        lateinit var database: PostgresDatabase
+        lateinit var pool: MinamotoPool
+        return listOf(
 
-    @TestFactory
-    fun `array and JSON codec tests across postgres versions`() = postgresImages.map { image ->
-        val postgres = PostgreSQLContainer(
-            DockerImageName.parse(image).asCompatibleSubstituteFor("postgres")
-        ).withDatabaseName("testdb").withUsername("testuser").withPassword("testpass")
-
-        dynamicContainer(image, listOf(
-
-            dynamicTest("start container") { postgres.start() },
-
-            array<List<*>>(postgres, "INT4[] column decoded as List<Int>",
-                "SELECT ARRAY[1, 2, 3]::int4[] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                assertEquals(listOf(1, 2, 3), it as List<Int>)
-            },
-            array<List<*>>(postgres, "INT8[] column decoded as List<Long>",
-                "SELECT ARRAY[1, 2, 3]::int8[] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                assertEquals(listOf(1L, 2L, 3L), it as List<Long>)
-            },
-            array<List<*>>(postgres, "FLOAT8[] column decoded as List<Double>",
-                "SELECT ARRAY[1.1, 2.2, 3.3]::float8[] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                val result = it as List<Double>
-                assertEquals(3, result.size)
-                assertEquals(1.1, result[0], 0.001)
-            },
-            array<List<*>>(postgres, "BOOL[] column decoded as List<Boolean>",
-                "SELECT ARRAY[true, false, true]::bool[] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                assertEquals(listOf(true, false, true), it as List<Boolean>)
-            },
-            array<List<*>>(postgres, "TEXT[] column decoded as List<String>",
-                "SELECT ARRAY['foo', 'bar', 'baz']::text[] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                assertEquals(listOf("foo", "bar", "baz"), it as List<String>)
-            },
-            array<List<*>>(postgres, "UUID[] column decoded as List<UUID>",
-                "SELECT ARRAY['550e8400-e29b-41d4-a716-446655440000']::uuid[] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                assertEquals(listOf(UUID.fromString("550e8400-e29b-41d4-a716-446655440000")), it as List<UUID>)
-            },
-            array<List<*>>(postgres, "TIMESTAMP[] column decoded as List<LocalDateTime>",
-                "SELECT ARRAY['2026-07-14T10:00:00'::timestamp] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                assertEquals(listOf(LocalDateTime(2026, 7, 14, 10, 0, 0)), it as List<LocalDateTime>)
-            },
-            array<List<*>>(postgres, "TIMESTAMPTZ[] column decoded as List<Instant>",
-                "SELECT ARRAY['2026-07-14T10:00:00Z'::timestamptz] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                assertEquals(listOf(Instant.parse("2026-07-14T10:00:00Z")), it as List<Instant>)
-            },
-            array<List<*>>(postgres, "NUMERIC[] column decoded as List<BigDecimal>",
-                "SELECT ARRAY[1.5, 2.5]::numeric[] AS v", "v") {
-                @Suppress("UNCHECKED_CAST")
-                assertEquals(listOf(BigDecimal("1.5"), BigDecimal("2.5")), it as List<BigDecimal>)
+            dynamicTest("start container") {
+                postgres.start()
+                val (db, p) = connect(postgres)
+                database = db
+                pool = p
             },
 
+            // --- Array decoding ---
+
+            dynamicTest("INT4[] column decoded as List<Int>") {
+                Verify.that(
+                    database.query("SELECT ARRAY[1, 2, 3]::int4[] AS v").single().map { row ->
+                        @Suppress("UNCHECKED_CAST")
+                        row.get<List<*>>("v") as List<Int>
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf(1, 2, 3), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("INT8[] column decoded as List<Long>") {
+                Verify.that(
+                    database.query("SELECT ARRAY[1, 2, 3]::int8[] AS v").single().map { row ->
+                        @Suppress("UNCHECKED_CAST")
+                        row.get<List<*>>("v") as List<Long>
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf(1L, 2L, 3L), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("FLOAT8[] column decoded as List<Double>") {
+                Verify.that(
+                    database.query("SELECT ARRAY[1.1, 2.2, 3.3]::float8[] AS v").single().map { row ->
+                        @Suppress("UNCHECKED_CAST")
+                        row.get<List<*>>("v") as List<Double>
+                    }, context = PoolContext(pool),
+                ).assertNext { result ->
+                    assertEquals(3, result.size)
+                    assertEquals(1.1, result[0], 0.001)
+                }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("BOOL[] column decoded as List<Boolean>") {
+                Verify.that(
+                    database.query("SELECT ARRAY[true, false, true]::bool[] AS v").single().map { row ->
+                        @Suppress("UNCHECKED_CAST")
+                        row.get<List<*>>("v") as List<Boolean>
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf(true, false, true), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("TEXT[] column decoded as List<String>") {
+                Verify.that(
+                    database.query("SELECT ARRAY['foo', 'bar', 'baz']::text[] AS v").single().map { row ->
+                        @Suppress("UNCHECKED_CAST")
+                        row.get<List<*>>("v") as List<String>
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf("foo", "bar", "baz"), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("UUID[] column decoded as List<UUID>") {
+                Verify.that(
+                    database.query("SELECT ARRAY['550e8400-e29b-41d4-a716-446655440000']::uuid[] AS v")
+                        .single().map { row ->
+                            @Suppress("UNCHECKED_CAST")
+                            row.get<List<*>>("v") as List<UUID>
+                        }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf(UUID.fromString("550e8400-e29b-41d4-a716-446655440000")), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("TIMESTAMP[] column decoded as List<LocalDateTime>") {
+                Verify.that(
+                    database.query("SELECT ARRAY['2026-07-14T10:00:00'::timestamp] AS v").single().map { row ->
+                        @Suppress("UNCHECKED_CAST")
+                        row.get<List<*>>("v") as List<LocalDateTime>
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf(LocalDateTime(2026, 7, 14, 10, 0, 0)), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("TIMESTAMPTZ[] column decoded as List<Instant>") {
+                Verify.that(
+                    database.query("SELECT ARRAY['2026-07-14T10:00:00Z'::timestamptz] AS v").single().map { row ->
+                        @Suppress("UNCHECKED_CAST")
+                        row.get<List<*>>("v") as List<Instant>
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf(Instant.parse("2026-07-14T10:00:00Z")), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("NUMERIC[] column decoded as List<BigDecimal>") {
+                Verify.that(
+                    database.query("SELECT ARRAY[1.5, 2.5]::numeric[] AS v").single().map { row ->
+                        @Suppress("UNCHECKED_CAST")
+                        row.get<List<*>>("v") as List<BigDecimal>
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf(BigDecimal("1.5"), BigDecimal("2.5")), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
             dynamicTest("empty array round-trips as empty List") {
-                val (database, pool) = connectWithPool(postgres)
-                runBlocking {
-                    pool {
-                        val row = database.query("SELECT ARRAY[]::int4[] AS v").single().await().rightOrThrow()
-                        assertEquals(emptyList<Int>(), row.get<List<*>>("v"))
-                    }
-                }
+                Verify.that(
+                    database.query("SELECT ARRAY[]::int4[] AS v").single().map { row -> row.get<List<*>>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(emptyList<Int>(), it) }.completesNormally(within = TEST_TIMEOUT)
             },
-
             dynamicTest("single-element array round-trips") {
-                val (database, pool) = connectWithPool(postgres)
-                runBlocking {
-                    pool {
-                        val row = database.query("SELECT ARRAY[42]::int4[] AS v").single().await().rightOrThrow()
-                        assertEquals(listOf(42), row.get<List<*>>("v"))
-                    }
-                }
+                Verify.that(
+                    database.query("SELECT ARRAY[42]::int4[] AS v").single().map { row -> row.get<List<*>>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf(42), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("null element in array throws CodecFailed") {
+                val error = Verify.that(
+                    database.query("SELECT ARRAY[1, NULL, 3]::int4[] AS v").single()
+                        .map { row -> row.get<List<*>>("v") }, context = PoolContext(pool),
+                ).completesWithError(within = TEST_TIMEOUT)
+                assertIs<DatabaseException.CodecFailed>(error)
             },
 
-            dynamicTest("null element in array throws CodecFailed") {
-                val (database, pool) = connectWithPool(postgres)
-                val error = runBlocking {
-                    runCatching {
-                        pool {
-                            val row = database.query("SELECT ARRAY[1, NULL, 3]::int4[] AS v").single().await().rightOrThrow()
-                            row.get<List<*>>("v")
-                        }
-                    }.exceptionOrNull()
-                }
-                assertIs<MinamotoException.CodecFailed>(error)
-            },
+            // --- JSON codecs ---
 
             dynamicTest("json column decoded as @Serializable data class") {
                 val registry = CodecRegistry()
                 registry.registerJson<Payload>()
-                val (database, pool) = connectWithPool(postgres, registry)
-                runBlocking {
-                    pool {
-                        val row = database.query("SELECT '{\"id\":1,\"name\":\"walter\"}'::json AS v")
-                            .single().await().rightOrThrow()
-                        assertEquals(Payload(1, "walter"), row.get<Payload>("v"))
-                    }
-                }
+                val (db, p) = connect(postgres, registry)
+                Verify.that(
+                    db.query("SELECT '{\"id\":1,\"name\":\"walter\"}'::json AS v")
+                        .single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
+                ).assertNext { assertEquals(Payload(1, "walter"), it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
             },
-
             dynamicTest("jsonb column decoded as @Serializable data class") {
                 val registry = CodecRegistry()
                 registry.registerJsonb<Payload>()
-                val (database, pool) = connectWithPool(postgres, registry)
-                runBlocking {
-                    pool {
-                        val row = database.query("SELECT '{\"id\":2,\"name\":\"jesse\"}'::jsonb AS v")
-                            .single().await().rightOrThrow()
-                        assertEquals(Payload(2, "jesse"), row.get<Payload>("v"))
-                    }
-                }
+                val (db, p) = connect(postgres, registry)
+                Verify.that(
+                    db.query("SELECT '{\"id\":2,\"name\":\"jesse\"}'::jsonb AS v")
+                        .single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
+                ).assertNext { assertEquals(Payload(2, "jesse"), it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
             },
-
             dynamicTest("@Serializable parameter encoded into json column") {
                 val registry = CodecRegistry()
                 registry.registerJson<Payload>()
-                val payload  = Payload(3, "skyler")
-                val (database, pool) = connectWithPool(postgres, registry)
-                runBlocking {
-                    pool {
-                        val row = database.query("SELECT :v::json AS v")
-                            .bind("v" to payload)
-                            .single().await().rightOrThrow()
-                        assertEquals(payload, row.get<Payload>("v"))
-                    }
-                }
+                val payload = Payload(3, "skyler")
+                val (db, p) = connect(postgres, registry)
+                Verify.that(
+                    db.query("SELECT :v::json AS v").bind("v" to payload).single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
+                ).assertNext { assertEquals(payload, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
             },
-
             dynamicTest("@Serializable parameter encoded into jsonb column") {
                 val registry = CodecRegistry()
                 registry.registerJsonb<Payload>()
-                val payload  = Payload(4, "hank")
-                val (database, pool) = connectWithPool(postgres, registry)
-                runBlocking {
-                    pool {
-                        val row = database.query("SELECT :v::jsonb AS v")
-                            .bind("v" to payload)
-                            .single().await().rightOrThrow()
-                        assertEquals(payload, row.get<Payload>("v"))
-                    }
-                }
+                val payload = Payload(4, "hank")
+                val (db, p) = connect(postgres, registry)
+                Verify.that(
+                    db.query("SELECT :v::jsonb AS v").bind("v" to payload).single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
+                ).assertNext { assertEquals(payload, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
             },
-
             dynamicTest("json null column returns null via getOrNull") {
                 val registry = CodecRegistry()
                 registry.registerJson<Payload>()
-                val (database, pool) = connectWithPool(postgres, registry)
-                runBlocking {
-                    pool {
-                        val row = database.query("SELECT NULL::json AS v")
-                            .single().await().rightOrThrow()
-                        assertNull(row.getOrNull<Payload>("v"))
-                    }
-                }
+                val (db, p) = connect(postgres, registry)
+                Verify.that(
+                    db.query("SELECT NULL::json AS v").single(), context = PoolContext(p),
+                ).assertNext { row -> assertNull(row.getOrNull<Payload>("v")) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
             },
 
-            dynamicTest("stop container") { postgres.stop() },
-
-        ))
+            dynamicTest("stop container") {
+                Verify.that(pool.close()).completesNormally()
+                postgres.stop()
+            },
+        )
     }
 }

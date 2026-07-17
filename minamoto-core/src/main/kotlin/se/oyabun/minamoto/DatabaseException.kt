@@ -21,42 +21,42 @@ package se.oyabun.minamoto
  * Catch this single type to handle any library failure,
  * then narrow with `when` for specific handling.
  */
-sealed class MinamotoException(message: String, cause: Throwable? = null) : RuntimeException(message, cause) {
+sealed class DatabaseException(message: String, cause: Throwable? = null) : RuntimeException(message, cause) {
 
     /** The requested column does not exist in the result row. */
     class UnknownColumn(name: String) :
-        MinamotoException("unknown column: $name")
+        DatabaseException("unknown column: $name")
 
     /** A value retrieved from a row was null but a non-null type was requested. */
     class UnexpectedNull(column: String) :
-        MinamotoException("unexpected null value for column: $column")
+        DatabaseException("unexpected null value for column: $column")
 
     /** The connection pool could not acquire a connection within the allowed time. */
     class PoolTimeout(message: String) :
-        MinamotoException(message)
+        DatabaseException(message)
 
     /** The connection pool could not acquire a connection within [se.oyabun.minamoto.pool.PoolConfig.acquireTimeout]. */
     class AcquireTimeout(timeout: kotlin.time.Duration) :
-        MinamotoException("pool acquire timed out after $timeout")
+        DatabaseException("pool acquire timed out after $timeout")
 
     /** A pooled connection failed validation before being returned to a caller. */
     class ValidationFailed(reason: String, cause: Throwable? = null) :
-        MinamotoException("connection validation failed: $reason", cause)
+        DatabaseException("connection validation failed: $reason", cause)
 
     /**
      * Acquiring a connection would deadlock the current coroutine chain —
      * all connections from this pool are already held by this chain.
      */
     class DeadlockDetected(held: Int, poolSize: Int) :
-        MinamotoException("deadlock detected: coroutine chain holds $held/$poolSize connections from the same pool")
+        DatabaseException("deadlock detected: coroutine chain holds $held/$poolSize connections from the same pool")
 
     /** The connection was closed unexpectedly. */
     class ConnectionClosed(message: String, cause: Throwable? = null) :
-        MinamotoException(message, cause)
+        DatabaseException(message, cause)
 
     /** Authentication with the database server failed. */
     class AuthenticationFailed(message: String, cause: Throwable? = null) :
-        MinamotoException(message, cause)
+        DatabaseException(message, cause)
 
     /**
      * The database server rejected the query.
@@ -73,7 +73,7 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
         val detail:       String = "",
         val hint:         String = "",
         cause:            Throwable? = null,
-    ) : MinamotoException(message, cause)
+    ) : DatabaseException(message, cause)
 
     /** Unique constraint violation — SQLSTATE 23505. */
     class UniqueViolation(
@@ -81,7 +81,7 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
         val sqlState: String,
         val detail:   String = "",
         val hint:     String = "",
-    ) : MinamotoException(message)
+    ) : DatabaseException(message)
 
     /** Foreign key constraint violation — SQLSTATE 23503. */
     class ForeignKeyViolation(
@@ -89,21 +89,21 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
         val sqlState: String,
         val detail:   String = "",
         val hint:     String = "",
-    ) : MinamotoException(message)
+    ) : DatabaseException(message)
 
     /** Not-null constraint violation — SQLSTATE 23502. */
     class NotNullViolation(
         message:      String,
         val sqlState: String,
         val detail:   String = "",
-    ) : MinamotoException(message)
+    ) : DatabaseException(message)
 
     /** Check constraint violation — SQLSTATE 23514. */
     class CheckViolation(
         message:      String,
         val sqlState: String,
         val detail:   String = "",
-    ) : MinamotoException(message)
+    ) : DatabaseException(message)
 
     /**
      * Serialization failure — SQLSTATE 40001.
@@ -111,7 +111,7 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
      * The transaction must be retried from the beginning. Occurs under SERIALIZABLE
      * isolation when concurrent transactions conflict.
      */
-    class SerializationFailure(message: String) : MinamotoException(message)
+    class SerializationFailure(message: String) : DatabaseException(message)
 
     /**
      * Deadlock detected — SQLSTATE 40P01.
@@ -119,41 +119,41 @@ sealed class MinamotoException(message: String, cause: Throwable? = null) : Runt
      * PostgreSQL chose this transaction as the deadlock victim. The transaction
      * must be retried.
      */
-    class ServerDeadlockDetected(message: String) : MinamotoException(message)
+    class ServerDeadlockDetected(message: String) : DatabaseException(message)
 
     /** Query cancelled by the client — SQLSTATE 57014. */
-    class QueryCancelled(message: String) : MinamotoException(message)
+    class QueryCancelled(message: String) : DatabaseException(message)
 
     /** Syntax error in the SQL statement — SQLSTATE 42601. */
-    class SyntaxError(message: String, val detail: String = "") : MinamotoException(message)
+    class SyntaxError(message: String, val detail: String = "") : DatabaseException(message)
 
     /** Undefined table or view — SQLSTATE 42P01. */
-    class UndefinedTable(message: String) : MinamotoException(message)
+    class UndefinedTable(message: String) : DatabaseException(message)
 
     /** Undefined column — SQLSTATE 42703. */
-    class UndefinedColumn(message: String) : MinamotoException(message)
+    class UndefinedColumn(message: String) : DatabaseException(message)
 
     /** A transaction could not be committed. */
     class CommitFailed(message: String, cause: Throwable? = null) :
-        MinamotoException(message, cause)
+        DatabaseException(message, cause)
 
     /** A transaction rollback failed. */
     class RollbackFailed(message: String, cause: Throwable? = null) :
-        MinamotoException(message, cause)
+        DatabaseException(message, cause)
 
     /** The connection to the server was lost. */
     class ConnectionLost(message: String, cause: Throwable? = null) :
-        MinamotoException(message, cause)
+        DatabaseException(message, cause)
 
     /** TLS negotiation or certificate validation failed. */
     class TlsFailed(message: String, cause: Throwable? = null) :
-        MinamotoException(message, cause)
+        DatabaseException(message, cause)
 
     /** A codec could not encode or decode a value. */
     class CodecFailed(message: String, cause: Throwable? = null) :
-        MinamotoException(message, cause)
+        DatabaseException(message, cause)
 
     /** The operation was attempted on a closed or invalid resource. */
     class InvalidState(message: String) :
-        MinamotoException(message)
+        DatabaseException(message)
 }

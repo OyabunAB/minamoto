@@ -26,29 +26,40 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import se.oyabun.aelv.Maybe
 import se.oyabun.aelv.Sinks
 import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.discard
-import se.oyabun.aelv.doOnNext
+import se.oyabun.aelv.doFinally
 import se.oyabun.aelv.flatMap
+import se.oyabun.aelv.firstMaybe
+import se.oyabun.aelv.or
+import se.oyabun.aelv.toMany
+import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.getOrThrow
+import se.oyabun.aelv.map
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 import se.oyabun.aelv.drain
-import se.oyabun.aelv.retry
-import se.oyabun.aelv.TimeoutException
+import se.oyabun.aelv.recover
 import se.oyabun.aelv.resource
+import se.oyabun.aelv.retry
+import se.oyabun.aelv.subscribeOn
+import se.oyabun.aelv.Either
+import se.oyabun.aelv.then
+import se.oyabun.aelv.thenReturn
+import se.oyabun.aelv.toMany
+import se.oyabun.aelv.TimeoutException
 import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
 import kotlin.internal.LowPriorityInOverloadResolution
 import se.oyabun.minamoto.Connection
 import se.oyabun.minamoto.ConnectionContext
 import se.oyabun.minamoto.ConnectionFactory
 import se.oyabun.minamoto.ConnectionId
 import se.oyabun.minamoto.ConnectionStack
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.PoolId
 import se.oyabun.minamoto.SavepointId
@@ -56,29 +67,15 @@ import se.oyabun.minamoto.TransactionBoundary
 import se.oyabun.minamoto.TransactionDefinition
 import se.oyabun.minamoto.TransactionId
 import se.oyabun.minamoto.ValidationResult
+import se.oyabun.minamoto.ConnectionAcquireResult
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.coroutines.coroutineContext
 
-/**
- * A connection pool backed by [UnicastSink] — each acquired slot goes to exactly one caller.
- *
- * Slots are pre-created up to [PoolConfig.initialSize] at startup and topped up to
- * [PoolConfig.minIdle] after each release. The pool never exceeds [PoolConfig.maxSize]
- * total connections.
- *
- * Backpressure is natural: callers acquiring when all slots are busy suspend on
- * [idle.asOne().await(acquireTimeout)]. No polling, no spin-waiting.
- *
- * [connectionBudget] is a shared [Semaphore] owned by the database — it enforces the
- * total live connection ceiling across all pools that target the same database server.
- * A permit is acquired before creating a physical connection and released on destroy.
- */
 class MinamotoPool(
-    override val config:            PoolConfig,
-    private  val factory:           ConnectionFactory,
-    private  val connectionBudget:  Semaphore? = null,
+    override val config:           PoolConfig,
+    private  val factory:          ConnectionFactory,
+    private  val connectionBudget: Semaphore? = null,
 ) : ManagedPool {
 
     override val poolId: PoolId = PoolId(poolIdCounter.incrementAndGet())
@@ -100,253 +97,265 @@ class MinamotoPool(
         )
 
     init {
-        scope.launch { warmUp() }
-        if (config.eviction is EvictionPolicy.Scheduled) {
-            Many.interval(config.eviction.interval).drain(
-                onNext     = { evict() },
-                onError    = { /* eviction errors are non-fatal */ },
-                onComplete = { },
-            )
-        }
+        scope.launch { warmUp().await() }
+        if (config.eviction is EvictionPolicy.Scheduled)
+            Many.interval(config.eviction.interval).drain(onNext = { evict() }, onError = {})
     }
 
-    override suspend fun acquireSlot(): AcquireResult {
-        val connectionContext = coroutineContext[ConnectionContext]
-
-        // Deadlock detection — this coroutine chain already holds connections from this pool
-        // and the pool is at capacity. Blocking would guarantee a deadlock.
-        if (connectionContext != null) {
-            val heldFromThisPool = connectionContext.heldCountFor(poolId)
-            if (heldFromThisPool > 0 && total.get() >= config.maxSize &&
-                slots.values.none { it.state is SlotState.Idle }) {
-                return AcquireResult.DeadlockPrevented(heldFromThisPool, config.maxSize)
-            }
-        }
-
-        maybeCreateSlot()
-
-        waiting.incrementAndGet()
-        return try {
-            val slot = idle.asOne()
-                .await(config.acquireTimeout)
-                .getOrThrow()
-                .copy(state = SlotState.Acquired, lastUsed = System.nanoTime())
-                .also { slots[it.id] = it }
-
-            if (config.validation !is ValidationQuery.None) {
-                val result = One.defer { factory.validate(slot.connection) }
-                    .await(config.validationTimeout)
-                    .fold(
-                        onLeft  = { throw MinamotoException.ValidationFailed("timeout", it) },
-                        onRight = { it },
-                    )
-                if (result is ValidationResult.Invalid) {
-                    invalidate(slot.id)
-                    return acquireSlot()
+    /**
+     * Acquires one budget permit, creates a physical connection, then registers it as an idle slot.
+     *
+     * The budget permit and [total] counter are released on any failure so the pool
+     * stays consistent without imperative try/finally.
+     */
+    private fun createSlot(): None<Connection> =
+        None.defer<Unit> { connectionBudget?.acquire() }
+            .then { factory.create().retry(config.acquireRetry.toLong()) }
+            .flatMapNone { connection ->
+                None.defer<Unit> {
+                    createLock.withLock {
+                        if (total.get() >= config.maxSize) {
+                            factory.destroy(connection).await()
+                            connectionBudget?.release()
+                            return@withLock
+                        }
+                        total.incrementAndGet()
+                        val slot = PoolSlot(connection, SlotState.Idle, System.nanoTime(), System.nanoTime())
+                        slots[slot.id] = slot
+                        idle.emit(slot)
+                    }
                 }
             }
+            .recover { e ->
+                None.defer<Unit> { connectionBudget?.release() }
+                    .then { None.error(DatabaseException.ConnectionLost(
+                        "failed to create connection after ${config.acquireRetry} retries", e
+                    )) }
+            }
 
-            try {
-                when (val hook = config.postAllocate) {
-                    is ConnectionHook.NoOp   -> { }
-                    is ConnectionHook.Action -> hook.block()
+    private fun maybeCreateSlot(): None<Unit> {
+        val needsReplenishment = total.get() < config.minIdle
+        val hasCapacity        = total.get() < config.maxSize
+        return if (needsReplenishment || (waiting.get() > 0 && hasCapacity))
+            None.defer<Unit> { scope.launch { createSlot().await() } }
+        else
+            None.complete()
+    }
+
+    override fun acquireSlot(): One<AcquireResult> =
+        One.defer { coroutineContext[ConnectionContext] ?: ConnectionContext() }
+            .flatMap { ctx ->
+                val held       = ctx.heldCountFor(poolId)
+                val existingId = ctx.activeConnectionId()
+
+                if (existingId != null && ctx.activePoolId() == poolId) {
+                    val slot = slots[existingId] ?: return@flatMap One.error(DatabaseException.InvalidState("active connection not found in pool slots"))
+                    ctx.acquire(existingId, poolId)
+                    return@flatMap One.single(AcquireResult.Acquired(slot))
                 }
-            } catch (e: Exception) {
-                invalidate(slot.id)
-                throw MinamotoException.ConnectionLost("postAllocate failed", e)
+
+                if (held > 0 && total.get() >= config.maxSize && slots.values.none { it.state is SlotState.Idle })
+                    return@flatMap One.single(AcquireResult.DeadlockPrevented(held, config.maxSize))
+
+                None.defer<Unit> { waiting.incrementAndGet() }
+                    .then { maybeCreateSlot() }
+                    .then { idle.asOne() }
+                    .doFinally { waiting.decrementAndGet() }
+                    .map { slot: PoolSlot -> slot.copy(state = SlotState.Acquired, lastUsed = System.nanoTime()).also { slots[it.id] = it } }
+                    .flatMap { slot -> validateAndHook(slot) }
+                    .map { slot -> ctx.acquire(slot.id, poolId); AcquireResult.Acquired(slot) as AcquireResult }
+                    .recover { e -> if (e is TimeoutException) AcquireResult.TimedOut else throw e }
             }
 
-            connectionContext?.acquire(slot.id, poolId)
-            AcquireResult.Acquired(slot)
-        } catch (e: se.oyabun.aelv.TimeoutException) {
-            AcquireResult.TimedOut
-        } finally {
-            waiting.decrementAndGet()
+    private fun validateAndHook(slot: PoolSlot): One<PoolSlot> =
+        (if (config.validation is ValidationQuery.None) One.single(slot)
+        else factory.validate(slot.connection)
+            .map { validity: ValidationResult ->
+                if (validity is ValidationResult.Invalid) throw DatabaseException.ValidationFailed("invalid: ${validity.reason}", null)
+                slot
+            }
+        ).flatMap { s: PoolSlot ->
+            when (val hook = config.postAllocate) {
+                is ConnectionHook.NoOp   -> One.single(s)
+                is ConnectionHook.Action -> None.defer<Unit> { hook.block() }
+                    .recover { e: Exception -> None.error(DatabaseException.ConnectionLost("postAllocate failed", e)) }
+                    .thenReturn(s)
+            }
+        }.recover { e: Exception ->
+            invalidate(slot.id)
+            throw e
+        }
+
+    override fun release(id: ConnectionId): None<Unit> {
+        val slot = slots[id] ?: return None.complete()
+        val now  = System.nanoTime()
+        return when (val hook = config.preRelease) {
+            is ConnectionHook.NoOp   -> None.complete()
+            is ConnectionHook.Action -> None.defer<Unit> { hook.block() }
+                .recover { e -> invalidate(id); return@recover null as Nothing }
+        }
+        .then {
+            None.defer<Unit> { coroutineContext[ConnectionContext]?.release(id) }
+        }
+        .then {
+            if (now - slot.createdAt > config.maxLifetime.inWholeNanoseconds ||
+                now - slot.lastUsed  > config.idleTimeout.inWholeNanoseconds)
+                invalidate(id)
+            else None.defer<Unit> {
+                slots[id] = slot.copy(state = SlotState.Idle, lastUsed = now)
+                idle.emit(slots[id]!!)
+                if (config.eviction is EvictionPolicy.OnRelease) evict()
+            }.then { maybeCreateSlot() }
         }
     }
 
-    override suspend fun release(id: ConnectionId) {
-        val slot = slots[id] ?: return
-
-        try {
-            when (val hook = config.preRelease) {
-                is ConnectionHook.NoOp   -> { /* nothing */ }
-                is ConnectionHook.Action -> hook.block()
-            }
-        } catch (e: Exception) {
-            invalidate(id)
-            return
-        }
-
-        coroutineContext[ConnectionContext]?.release(id)
-
-        val now      = System.nanoTime()
-        val age      = now - slot.createdAt
-        val idleTime = now - slot.lastUsed
-
-        if (age > config.maxLifetime.inWholeNanoseconds ||
-            idleTime > config.idleTimeout.inWholeNanoseconds) {
-            invalidate(id)
-            return
-        }
-
-        val released = slot.copy(state = SlotState.Idle, lastUsed = now)
-        slots[id] = released
-        idle.emit(released)
-
-        if (config.eviction is EvictionPolicy.OnRelease) evict()
-
-        maybeCreateSlot()
-    }
-
-    override suspend fun invalidate(id: ConnectionId) {
-        val slot = slots.remove(id) ?: return
+    override fun invalidate(id: ConnectionId): None<Unit> {
+        val slot = slots.remove(id) ?: return None.complete()
         total.decrementAndGet()
-        runCatching { factory.destroy(slot.connection) }
-        connectionBudget?.release()
-        None.defer<Unit> { maybeCreateSlot() }.await()
+        return factory.destroy(slot.connection)
+            .recover { None.complete<Unit>() }
+            .then { None.defer<Unit> { connectionBudget?.release(); maybeCreateSlot().await() } }
     }
 
-    override suspend fun close() {
-        scope.cancel()
-        idle.complete()
+    override fun close(): None<Unit> =
         Many.from(slots.values.toList())
-            .doOnNext(action = suspend { slot: PoolSlot ->
-                try {
-                    factory.destroy(slot.connection)
-                    connectionBudget?.release()
-                } catch (_: Exception) {}
-            })
-            .discard().await()
-        slots.clear()
-        total.set(0)
+            .flatMapNone { slot ->
+                factory.destroy(slot.connection)
+                    .recover { None.complete<Unit>() }
+                    .then { None.defer<Unit> { connectionBudget?.release() } }
+            }
+            .then {
+                None.defer<Unit> {
+                    scope.cancel()
+                    idle.complete()
+                    slots.clear()
+                    total.set(0)
+                }
+            }
+
+    private fun warmUp(): None<Int> =
+        Many.range(0, config.initialSize)
+            .flatMapNone { _: Int ->
+                if (total.get() < config.maxSize) createSlot()
+                else None.complete<Connection>()
+            }
+
+    private fun evict() {
+        val now   = System.nanoTime()
+        val stale = slots.values.filter { it.state is SlotState.Idle }.filter {
+            now - it.createdAt > config.maxLifetime.inWholeNanoseconds ||
+            now - it.lastUsed  > config.idleTimeout.inWholeNanoseconds
+        }
+        scope.launch {
+            Many.from(stale)
+                .flatMapNone { slot -> invalidate(slot.id) }
+                .await()
+        }
     }
 
-    /**
-     * Runs [block] with this pool installed in the coroutine context.
-     *
-     * Every pipeline subscribed inside [block] that resolves a connection will acquire one
-     * from this pool. The innermost enclosing pool wins when scopes are nested.
-     * No transaction is started — each pipeline runs in autocommit mode unless wrapped
-     * by [transactionally].
-     */
     suspend operator fun <T> invoke(block: suspend () -> T): T =
-        withContext(currentCoroutineContext() + PoolContext(this)) {
-            block()
-        }
+        withContext(currentCoroutineContext() + PoolContext(this)) { block() }
 
     /**
-     * Runs [block] with this pool installed in the coroutine context and a transaction active.
+     * Wraps a pipeline with this pool's context, installed at subscription time.
      *
-     * Acquires a connection, sends `BEGIN` with [definition], installs both in the coroutine
-     * context, then runs [block]. On normal exit sends `COMMIT`; on any exception sends
-     * `ROLLBACK` before rethrowing.
-     *
-     * Nested [transactionally] calls detect the active transaction via [ConnectionContext]:
-     * - Same pool, already in a transaction → creates a savepoint instead of a new `BEGIN`
-     * - Different pool → independent transaction on that pool's connection
+     * Each pipeline element that resolves a connection will acquire one from this pool.
+     * No transaction is started — use [transaction] for transactional pipelines.
      */
+    fun <T : Any> scoped(pipeline: Many<T>): Many<T> = pipeline.subscribeOn(PoolContext(this))
+    fun <T : Any> scoped(pipeline: One<T>):  One<T>  = pipeline.subscribeOn(PoolContext(this))
+
     @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
     suspend fun <T> transactionally(
         definition: TransactionDefinition = TransactionDefinition(),
         block:      suspend () -> T,
     ): T {
-        val handle = openTransaction(definition)
+        val handle = openTransaction(definition).await().getOrThrow()
         return try {
             val result = withContext(handle.txContext) { block() }
-            closeTransaction(handle, null)
+            closeTransaction<Unit>(handle, Either.success(Unit)).await()
             result
         } catch (thrown: Throwable) {
-            closeTransaction(handle, thrown)
+            closeTransaction<Unit>(handle, Either.failure(thrown)).await()
             throw thrown
         }
     }
 
-    /**
-     * Wraps a [Many] pipeline in a transaction.
-     *
-     * The connection is acquired and `BEGIN` is sent when the pipeline is subscribed.
-     * `COMMIT` fires on normal completion, `ROLLBACK` on error. The connection is held
-     * for the full lifetime of the stream — rows are streamed inside the open transaction.
-     *
-     * The returned [Many] is a pure pipeline component — fully chainable with no suspension
-     * at definition time. Nested calls on the same pool use a savepoint automatically.
-     */
-    fun <T : Any> transaction(
-        definition: TransactionDefinition = TransactionDefinition(),
+    override fun <T : Any> transactionally(
+        definition: TransactionDefinition,
+        block:      () -> One<T>,
+    ): One<T> = Many.resource(
+        acquire = { openTransaction(definition) },
+        release = { handle, signal -> closeTransaction<T>(handle, signal) },
+        use     = { handle -> block().subscribeOn(handle.txContext).toMany() },
+    ).firstMaybe().or { throw DatabaseException.InvalidState("transactionally block returned no value") }
+
+    override fun <T : Any> transactionally(
+        definition: TransactionDefinition,
         block:      () -> Many<T>,
     ): Many<T> = Many.resource(
         acquire = { openTransaction(definition) },
-        release = { handle, error -> closeTransaction(handle, error) },
-        use     = { handle -> Many.defer(factory = suspend { withContext(handle.txContext) { block() } }) },
+        release = { handle, signal -> closeTransaction<T>(handle, signal) },
+        use     = { handle -> block().subscribeOn(handle.txContext) },
     )
 
-    /**
-     * Acquires a connection, sends `BEGIN`, and builds the composite [CoroutineContext] to install.
-     *
-     * For nested calls on the same pool, issues `SAVEPOINT` instead. The returned [TransactionHandle]
-     * carries everything [closeTransaction] needs to commit or roll back correctly.
-     */
-    private suspend fun openTransaction(definition: TransactionDefinition): TransactionHandle {
-        val outerContext      = currentCoroutineContext()
-        val connectionContext = outerContext[ConnectionContext] ?: ConnectionContext()
-        val existingId        = connectionContext.activeConnectionId()
-        val existingPoolId    = connectionContext.activePoolId()
+    private fun openTransaction(definition: TransactionDefinition): One<TransactionHandle> =
+        acquireSlot()
+            .flatMap(transform = suspend { result: AcquireResult ->
+                val slot = when (result) {
+                    is AcquireResult.Acquired          -> result.slot
+                    is AcquireResult.TimedOut          -> return@flatMap One.error(DatabaseException.AcquireTimeout(config.acquireTimeout))
+                    is AcquireResult.DeadlockPrevented -> return@flatMap One.error(DatabaseException.DeadlockDetected(result.held, result.poolSize))
+                }
+                val outerContext      = currentCoroutineContext()
+                val connectionContext = outerContext[ConnectionContext] ?: ConnectionContext()
+                val existingId        = connectionContext.activeConnectionId()
 
-        if (existingId != null && existingPoolId == poolId) {
-            val savepointId = SavepointId("sp_${savepointCounter.incrementAndGet()}")
-            val slot        = slots[existingId]
-                ?: throw MinamotoException.InvalidState("active connection not found in pool slots")
-            slot.connection.savepoint(savepointId)
-            val newFrame = ConnectionStack.Frame(
-                connection  = existingId,
-                poolId      = poolId,
-                transaction = TransactionBoundary.Savepoint(savepointId),
-                parent      = connectionContext.stack,
-            )
-            return TransactionHandle(
-                connection  = slot.connection,
-                slotId      = existingId,
-                savepoint   = savepointId,
-                txContext   = outerContext + connectionContext.push(newFrame) + PoolContext(this),
-                releaseSlot = false,
-            )
-        }
+                if (existingId != null && connectionContext.activePoolId() == poolId) {
+                    val savepointId  = SavepointId("sp_${savepointCounter.incrementAndGet()}")
+                    val existingSlot = slots[existingId]
+                        ?: return@flatMap One.error(DatabaseException.InvalidState("active connection not found in pool slots"))
+                    val handle = TransactionHandle(
+                        connection  = existingSlot.connection,
+                        slotId      = existingId,
+                        savepoint   = savepointId,
+                        txContext   = outerContext + connectionContext.push(ConnectionStack.Frame(existingId, poolId, TransactionBoundary.Savepoint(savepointId), connectionContext.stack)) + PoolContext(this@MinamotoPool),
+                        releaseSlot = false,
+                    )
+                    existingSlot.connection.savepoint(savepointId)
+                        .then { One.single(handle) }
+                } else {
+                    val transactionId = TransactionId(transactionIdCounter.incrementAndGet())
+                    val handle = TransactionHandle(
+                        connection  = slot.connection,
+                        slotId      = slot.id,
+                        savepoint   = null,
+                        txContext   = outerContext + connectionContext.push(ConnectionStack.Frame(slot.id, poolId, TransactionBoundary.Root(transactionId, definition), connectionContext.stack)) + PoolContext(this@MinamotoPool),
+                        releaseSlot = true,
+                    )
+                    slot.connection.begin(definition)
+                        .then { One.single(handle) }
+                }
+            })
 
-        val acquireResult = acquireSlot()
-        val slot = when (acquireResult) {
-            is AcquireResult.Acquired          -> acquireResult.slot
-            is AcquireResult.TimedOut          -> throw MinamotoException.AcquireTimeout(config.acquireTimeout)
-            is AcquireResult.DeadlockPrevented -> throw MinamotoException.DeadlockDetected(
-                acquireResult.held, acquireResult.poolSize
-            )
-        }
-        val newFrame = ConnectionStack.Frame(
-            connection  = slot.id,
-            poolId      = poolId,
-            transaction = TransactionBoundary.Root(TransactionId(transactionIdCounter.incrementAndGet()), definition),
-            parent      = connectionContext.stack,
-        )
-        slot.connection.begin(definition)
-        return TransactionHandle(
-            connection  = slot.connection,
-            slotId      = slot.id,
-            savepoint   = null,
-            txContext   = outerContext + connectionContext.push(newFrame) + PoolContext(this),
-            releaseSlot = true,
-        )
-    }
-
-    private suspend fun closeTransaction(handle: TransactionHandle, error: Throwable?) {
+    private fun <T : Any> closeTransaction(handle: TransactionHandle, signal: Either<Throwable, Unit>): None<T> {
         val savepoint = handle.savepoint
-        if (savepoint != null) {
-            if (error != null) runCatching { handle.connection.rollbackToSavepoint(savepoint) }
-            else               runCatching { handle.connection.releaseSavepoint(savepoint) }
+        @Suppress("UNCHECKED_CAST")
+        return if (savepoint != null) {
+            if (signal is Either.Left)
+                handle.connection.rollbackToSavepoint(savepoint).recover { None.complete() }
+            else
+                handle.connection.releaseSavepoint(savepoint).recover { None.complete() }
         } else {
-            if (error != null) runCatching { handle.connection.rollback() }
-            else               handle.connection.commit()
-            if (handle.releaseSlot) release(handle.slotId)
-        }
+            val endTransaction = if (signal is Either.Left)
+                handle.connection.rollback().recover { None.complete() }
+            else
+                handle.connection.commit()
+            if (handle.releaseSlot)
+                endTransaction.then { release(handle.slotId) }
+            else
+                endTransaction
+        } as None<T>
     }
 
     private data class TransactionHandle(
@@ -357,64 +366,6 @@ class MinamotoPool(
         val releaseSlot: Boolean,
     )
 
-    private suspend fun warmUp() {
-        Many.range(0, config.initialSize)
-            .concatMap { _: Int ->
-                if (total.get() < config.maxSize)
-                    Many.defer(factory = suspend { createSlot(); Many.empty<Int>() })
-                else
-                    Many.empty()
-            }
-            .discard().await()
-    }
-
-    private suspend fun maybeCreateSlot() {
-        val needsReplenishment = total.get() < config.minIdle
-        val hasWaiters         = waiting.get() > 0 && total.get() < config.maxSize
-        if (needsReplenishment || hasWaiters) createSlot()
-    }
-
-    private suspend fun createSlot() {
-        createLock.withLock {
-            if (total.get() >= config.maxSize) return
-            // Acquire a permit from the shared database-wide connection budget before
-            // opening a physical connection. Released in invalidate() and close().
-            connectionBudget?.acquire()
-            total.incrementAndGet()
-            try {
-                val connection = One.defer { factory.create() }
-                    .retry(config.acquireRetry.toLong())
-                    .await(config.createTimeout)
-                    .getOrThrow()
-                val slot = PoolSlot(
-                    connection = connection,
-                    state      = SlotState.Idle,
-                    createdAt  = System.nanoTime(),
-                    lastUsed   = System.nanoTime(),
-                )
-                slots[slot.id] = slot
-                idle.emit(slot)
-            } catch (e: Exception) {
-                total.decrementAndGet()
-                connectionBudget?.release()
-                throw MinamotoException.ConnectionLost(
-                    "failed to create connection after ${config.acquireRetry} retries", e
-                )
-            }
-        }
-    }
-
-    private fun evict() {
-        val now   = System.nanoTime()
-        val stale = slots.values.filter { it.state is SlotState.Idle }.filter {
-            now - it.createdAt > config.maxLifetime.inWholeNanoseconds ||
-            now - it.lastUsed  > config.idleTimeout.inWholeNanoseconds
-        }
-        Many.from(stale)
-            .flatMap { slot -> Many.defer(factory = suspend { invalidate(slot.id); Many.empty<Unit>() }) }
-            .drain(onNext = {}, onError = {})
-    }
-
     companion object {
         private val poolIdCounter        = AtomicLong(0)
         private val transactionIdCounter = AtomicLong(0)
@@ -422,11 +373,14 @@ class MinamotoPool(
     }
 
     override fun connectionFor(id: ConnectionId): Connection? = slots[id]?.connection
-    override suspend fun acquire(): se.oyabun.minamoto.ConnectionAcquireResult {
-        return when (val result = acquireSlot()) {
-            is AcquireResult.Acquired          -> se.oyabun.minamoto.ConnectionAcquireResult.Acquired(result.slot.connection)
-            is AcquireResult.TimedOut          -> se.oyabun.minamoto.ConnectionAcquireResult.TimedOut
-            is AcquireResult.DeadlockPrevented -> se.oyabun.minamoto.ConnectionAcquireResult.DeadlockDetected(result.held, result.poolSize)
+
+    override fun acquire(): One<ConnectionAcquireResult> =
+        acquireSlot().map { result ->
+            when (result) {
+                is AcquireResult.Acquired          -> ConnectionAcquireResult.Acquired(result.slot.connection)
+                is AcquireResult.TimedOut          -> ConnectionAcquireResult.TimedOut
+                is AcquireResult.DeadlockPrevented -> ConnectionAcquireResult.DeadlockDetected(result.held, result.poolSize)
+            }
         }
-    }
 }
+

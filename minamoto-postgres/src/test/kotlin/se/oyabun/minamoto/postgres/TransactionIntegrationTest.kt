@@ -1,15 +1,19 @@
 package se.oyabun.minamoto.postgres
 
 import org.junit.jupiter.api.DynamicContainer.dynamicContainer
+import org.junit.jupiter.api.DynamicNode
 import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
+import se.oyabun.aelv.Many
 import se.oyabun.aelv.Verify
-import se.oyabun.aelv.await
-import se.oyabun.aelv.getOrThrow
+import se.oyabun.aelv.flatMap
+import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.map
-import se.oyabun.minamoto.ConnectionState
+import se.oyabun.aelv.recover
+import se.oyabun.aelv.then
+import se.oyabun.aelv.toMany
 import se.oyabun.minamoto.IsolationLevel
 import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.TransactionDefinition
@@ -17,24 +21,18 @@ import se.oyabun.minamoto.TransactionMutability
 import se.oyabun.minamoto.pool.MinamotoPool
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
-import kotlinx.coroutines.runBlocking
+import se.oyabun.minamoto.transactionally
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
-/**
- * Tier 2 — transaction integration tests.
- *
- * Covers explicit transaction lifecycle, isolation levels, savepoints, and error recovery.
- */
 class TransactionIntegrationTest {
 
     companion object {
         val postgresImages = listOf(
-            "postgres:13-alpine@sha256:fb9065b6e3e213bdc07edd372a5b2a26245840b7fb65d1fd8b6700106d51805c",
-            "postgres:15-alpine@sha256:fceb6f86328c36f2438fae3b851b0cc57c4a7e69a58c866d9ce24281f2cf0c9c",
-            "postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609",
-            "postgres:18beta2-alpine@sha256:0164ef2cdce5fc6136d7de2cf9864bee88f593283608facace1e6460ba63ad0c",
+            "postgres:13-alpine",
+            "postgres:15-alpine",
+            "postgres:17-alpine",
+            "postgres:18beta2-alpine",
         )
     }
 
@@ -43,275 +41,197 @@ class TransactionIntegrationTest {
         val postgres = PostgreSQLContainer(
             DockerImageName.parse(image).asCompatibleSubstituteFor("postgres")
         ).withDatabaseName("testdb").withUsername("testuser").withPassword("testpass")
+        dynamicContainer(image, tests(postgres))
+    }
 
-        var database: PostgresDatabase? = null
-        var pool: MinamotoPool? = null
-
-        dynamicContainer(image, listOf(
+    private fun tests(postgres: PostgreSQLContainer): List<DynamicNode> {
+        lateinit var database: PostgresDatabase
+        lateinit var pool: MinamotoPool
+        return listOf(
 
             dynamicTest("start container") {
                 postgres.start()
-                database = PostgresDatabase(
-                    ConnectionConfig(
-                        host     = postgres.host,
-                        port     = postgres.firstMappedPort,
-                        user     = postgres.username,
-                        password = postgres.password,
-                        database = postgres.databaseName,
-                    )
-                )
-                pool = database!!.pool(PoolConfig(initialSize = 2, minIdle = 2, maxSize = 5, validation = ValidationQuery.None))
+                database = PostgresDatabase(ConnectionConfig(
+                    host     = postgres.host,
+                    port     = postgres.firstMappedPort,
+                    user     = postgres.username,
+                    password = { postgres.password },
+                    database = postgres.databaseName,
+                ))
+                pool = database.pool(PoolConfig(initialSize = 2, minIdle = 2, maxSize = 5, validation = ValidationQuery.None))
             },
 
-            // --- Explicit lifecycle ---
-
-            dynamicTest("connection is InTransaction inside transactionally block") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    // Use the transaction connection directly by running a query that reveals transaction state
-                    val inTransaction = p.transactionally {
-                        db.query("SELECT current_setting('transaction_isolation') IS NOT NULL AS ok")
-                            .single().map { it.get<Boolean>("ok") }
-                            .await().getOrThrow()
-                    }
-                    assertTrue(inTransaction)
-                }
-            },
+            // --- Commit persists rows ---
 
             dynamicTest("commit persists inserted row") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    // Use same connection for setup, insert, and verify by pinning to pool context
-                    p {
-                        db.effect("CREATE TABLE IF NOT EXISTS commit_test (id int)").execute().await().getOrThrow()
-                        db.effect("TRUNCATE commit_test").execute().await().getOrThrow()
-                    }
-                    p.transactionally<Unit> {
-                        db.command("INSERT INTO commit_test VALUES (1)").count().await().getOrThrow()
-                    }
-                    val count = p {
-                        db.query("SELECT count(*) AS n FROM commit_test").single()
-                            .map { it.get<Long>("n") }.await().getOrThrow()
-                    }
-                    assertEquals(1L, count)
-                    p { db.effect("DROP TABLE IF EXISTS commit_test").execute().await().getOrThrow() }
-                }
+                // DDL setup outside transaction
+                Verify.that(
+                    database.run("CREATE TABLE IF NOT EXISTS commit_test (id int)").execute().then { database.run("DELETE FROM commit_test").execute().toMany<Unit>() }, context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
+
+                Verify.that(
+                    transactionally {
+                        database.modify("INSERT INTO commit_test VALUES (1)").count().toMany()
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(1L, it) }.completesNormally(within = TEST_TIMEOUT)
+
+                Verify.that(
+                    database.query("SELECT count(*) AS n FROM commit_test").single()
+                        .map { it.get<Long>("n") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(1L, it) }.completesNormally(within = TEST_TIMEOUT)
             },
+
+            // --- Rollback discards rows ---
 
             dynamicTest("rollback discards inserted row") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    p {
-                        db.effect("CREATE TABLE IF NOT EXISTS rollback_test (id int)").execute().await().getOrThrow()
-                        db.effect("TRUNCATE rollback_test").execute().await().getOrThrow()
-                    }
-                    runCatching {
-                        p.transactionally<Unit> {
-                            db.command("INSERT INTO rollback_test VALUES (1)").count().await().getOrThrow()
-                            error("intentional rollback")
-                        }
-                    }
-                    val count = p {
-                        db.query("SELECT count(*) AS n FROM rollback_test").single()
-                            .map { it.get<Long>("n") }.await().getOrThrow()
-                    }
-                    assertEquals(0L, count)
-                    p { db.effect("DROP TABLE IF EXISTS rollback_test").execute().await().getOrThrow() }
-                }
-            },
+                Verify.that(
+                    database.run("CREATE TABLE IF NOT EXISTS rollback_test (id int)").execute().then { database.run("DELETE FROM rollback_test").execute().toMany<Unit>() }, context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
 
-            dynamicTest("nested transactionally on same pool uses savepoint") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    p {
-                        db.effect("CREATE TABLE IF NOT EXISTS savepoint_test (id int)").execute().await().getOrThrow()
-                        db.effect("TRUNCATE savepoint_test").execute().await().getOrThrow()
-                    }
-                    p.transactionally<Unit> {
-                        db.command("INSERT INTO savepoint_test VALUES (1)").count().await().getOrThrow()
-                        runCatching {
-                            p.transactionally<Unit> {
-                                db.command("INSERT INTO savepoint_test VALUES (2)").count().await().getOrThrow()
-                                error("rollback inner")
-                            }
-                        }
-                        val count = db.query("SELECT count(*) AS n FROM savepoint_test").single()
-                            .map { it.get<Long>("n") }.await().getOrThrow()
-                        assertEquals(1L, count)
-                    }
-                    p { db.effect("DROP TABLE IF EXISTS savepoint_test").execute().await().getOrThrow() }
-                }
-            },
+                Verify.that(
+                    transactionally {
+                        database.modify("INSERT INTO rollback_test VALUES (1)").count()
+                            .flatMapMany { Many.error<Long>(RuntimeException("intentional rollback")) }
+                    }, context = PoolContext(pool),
+                ).completesWithError(within = TEST_TIMEOUT)
 
-            // --- Isolation levels ---
-
-            dynamicTest("READ COMMITTED isolation level sent to server") {
-                val db = database!!; val p = pool!!
-                val level = runBlocking {
-                    p.transactionally {
-                        db.query("SHOW transaction_isolation").single()
-                            .map { it.get<String>("transaction_isolation") }
-                            .await().getOrThrow()
-                    }
-                }
-                assertEquals("read committed", level)
-            },
-
-            dynamicTest("REPEATABLE READ isolation level sent to server") {
-                val db = database!!; val p = pool!!
-                val level = runBlocking {
-                    p.transactionally(TransactionDefinition(isolation = IsolationLevel.RepeatableRead)) {
-                        db.query("SHOW transaction_isolation").single()
-                            .map { it.get<String>("transaction_isolation") }
-                            .await().getOrThrow()
-                    }
-                }
-                assertEquals("repeatable read", level)
-            },
-
-            dynamicTest("SERIALIZABLE isolation level sent to server") {
-                val db = database!!; val p = pool!!
-                val level = runBlocking {
-                    p.transactionally(TransactionDefinition(isolation = IsolationLevel.Serializable)) {
-                        db.query("SHOW transaction_isolation").single()
-                            .map { it.get<String>("transaction_isolation") }
-                            .await().getOrThrow()
-                    }
-                }
-                assertEquals("serializable", level)
-            },
-
-            // --- Read-only ---
-
-            dynamicTest("READ ONLY transaction definition prevents writes") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    p {
-                        db.effect("CREATE TABLE IF NOT EXISTS readonly_test (id int)").execute().await().getOrThrow()
-                    }
-                    val error = runCatching {
-                        p.transactionally<Unit>(TransactionDefinition(mutability = TransactionMutability.ReadOnly)) {
-                            db.command("INSERT INTO readonly_test VALUES (1)").count().await().getOrThrow()
-                        }
-                    }.exceptionOrNull()
-                    assertTrue(error != null, "expected error for write in READ ONLY transaction")
-                    p { db.effect("DROP TABLE IF EXISTS readonly_test").execute().await().getOrThrow() }
-                }
-            },
-
-            dynamicTest("DEFERRABLE transaction accepted by server") {
-                val db = database!!; val p = pool!!
-                val level = runBlocking {
-                    p.transactionally(TransactionDefinition(
-                        isolation  = IsolationLevel.Serializable,
-                        mutability = TransactionMutability.ReadOnly,
-                        deferrable = true,
-                    )) {
-                        db.query("SHOW transaction_isolation").single()
-                            .map { it.get<String>("transaction_isolation") }
-                            .await().getOrThrow()
-                    }
-                }
-                assertEquals("serializable", level)
+                Verify.that(
+                    database.query("SELECT count(*) AS n FROM rollback_test").single()
+                        .map { it.get<Long>("n") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(0L, it) }.completesNormally(within = TEST_TIMEOUT)
             },
 
             // --- Savepoints ---
 
-            dynamicTest("rollbackToSavepoint discards partial work") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    p {
-                        db.effect("CREATE TABLE IF NOT EXISTS sp_partial (id int)").execute().await().getOrThrow()
-                        db.effect("TRUNCATE sp_partial").execute().await().getOrThrow()
-                    }
-                    p.transactionally<Unit> {
-                        db.command("INSERT INTO sp_partial VALUES (1)").count().await().getOrThrow()
-                        runCatching {
-                            p.transactionally<Unit> {
-                                db.command("INSERT INTO sp_partial VALUES (2)").count().await().getOrThrow()
-                                error("rollback to savepoint")
-                            }
-                        }
-                        val count = db.query("SELECT count(*) AS n FROM sp_partial").single()
-                            .map { it.get<Long>("n") }.await().getOrThrow()
-                        assertEquals(1L, count)
-                    }
-                    p { db.effect("DROP TABLE IF EXISTS sp_partial").execute().await().getOrThrow() }
-                }
-            },
-
-            dynamicTest("releaseSavepoint commits nested work") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    p {
-                        db.effect("CREATE TABLE IF NOT EXISTS sp_release (id int)").execute().await().getOrThrow()
-                        db.effect("TRUNCATE sp_release").execute().await().getOrThrow()
-                    }
-                    p.transactionally<Unit> {
-                        db.command("INSERT INTO sp_release VALUES (1)").count().await().getOrThrow()
-                        p.transactionally<Unit> {
-                            db.command("INSERT INTO sp_release VALUES (2)").count().await().getOrThrow()
-                        }
-                        val count = db.query("SELECT count(*) AS n FROM sp_release").single()
-                            .map { it.get<Long>("n") }.await().getOrThrow()
-                        assertEquals(2L, count)
-                    }
-                    p { db.effect("DROP TABLE IF EXISTS sp_release").execute().await().getOrThrow() }
-                }
-            },
-
-            dynamicTest("multiple savepoints nest correctly") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    p {
-                        db.effect("CREATE TABLE IF NOT EXISTS sp_nest (id int)").execute().await().getOrThrow()
-                        db.effect("TRUNCATE sp_nest").execute().await().getOrThrow()
-                    }
-                    p.transactionally<Unit> {
-                        db.command("INSERT INTO sp_nest VALUES (1)").count().await().getOrThrow()
-                        p.transactionally<Unit> {
-                            db.command("INSERT INTO sp_nest VALUES (2)").count().await().getOrThrow()
-                            runCatching {
-                                p.transactionally<Unit> {
-                                    db.command("INSERT INTO sp_nest VALUES (3)").count().await().getOrThrow()
-                                    error("rollback innermost")
-                                }
-                            }
-                        }
-                        val count = db.query("SELECT count(*) AS n FROM sp_nest").single()
-                            .map { it.get<Long>("n") }.await().getOrThrow()
-                        assertEquals(2L, count)
-                    }
-                    p { db.effect("DROP TABLE IF EXISTS sp_nest").execute().await().getOrThrow() }
-                }
-            },
-
-            // --- Pipeline composition ---
-
-            dynamicTest("transaction pipeline overload streams rows inside transaction") {
-                val db = database!!; val p = pool!!
-                runBlocking {
-                    p {
-                        db.effect("CREATE TABLE IF NOT EXISTS pipeline_tx (v int)").execute().await().getOrThrow()
-                        db.effect("TRUNCATE pipeline_tx").execute().await().getOrThrow()
-                        db.command("INSERT INTO pipeline_tx VALUES (1),(2),(3)").count().await().getOrThrow()
-                    }
-                }
+            dynamicTest("nested transactionally uses savepoint — inner rollback preserved outer") {
                 Verify.that(
-                    p.transaction { db.query("SELECT v FROM pipeline_tx ORDER BY v").multiple() },
-                    timeout = 30.seconds,
-                    context = PoolContext(p),
-                ).emitsCount(3).completesNormally()
-                runBlocking {
-                    p { db.effect("DROP TABLE IF EXISTS pipeline_tx").execute().await().getOrThrow() }
-                }
+                    database.run("CREATE TABLE IF NOT EXISTS savepoint_test (id int)").execute().then { database.run("DELETE FROM savepoint_test").execute().toMany<Unit>() }, context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
+
+                val savepointPipeline: Many<Long> = transactionally(block = fun(): Many<Long> {
+                    val inner: Many<Long> = transactionally(block = fun(): Many<Long> {
+                        return database.modify("INSERT INTO savepoint_test VALUES (2)").count()
+                            .flatMapMany { Many.error<Long>(RuntimeException("inner fail")) }
+                    })
+                    return database.modify("INSERT INTO savepoint_test VALUES (1)").count()
+                        .flatMapMany { inner.recover { Many.items(0L) } }
+                        .flatMap {
+                            database.query("SELECT count(*) AS n FROM savepoint_test")
+                                .single().map { it.get<Long>("n") }.toMany()
+                        }
+                })
+                Verify.that(
+                    savepointPipeline, context = PoolContext(pool),
+                ).assertNext { assertEquals(1L, it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            dynamicTest("nested savepoint released commits inner work") {
+                Verify.that(
+                    database.run("CREATE TABLE IF NOT EXISTS sp_release (id int)").execute().then { database.run("DELETE FROM sp_release").execute().toMany<Unit>() }, context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
+
+                val releasePipeline: Many<Long> = transactionally(block = fun(): Many<Long> {
+                    val inner: Many<Long> = transactionally(block = fun(): Many<Long> {
+                        return database.modify("INSERT INTO sp_release VALUES (2)").count().toMany()
+                    })
+                    return database.modify("INSERT INTO sp_release VALUES (1)").count()
+                        .flatMapMany { inner }
+                        .flatMap {
+                            database.query("SELECT count(*) AS n FROM sp_release")
+                                .single().map { it.get<Long>("n") }.toMany()
+                        }
+                })
+                Verify.that(
+                    releasePipeline, context = PoolContext(pool),
+                ).assertNext { assertEquals(2L, it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            dynamicTest("multiple nested savepoints compose correctly") {
+                Verify.that(
+                    database.run("CREATE TABLE IF NOT EXISTS sp_nest (id int)").execute().then { database.run("DELETE FROM sp_nest").execute().toMany<Unit>() }, context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
+
+                val nestPipeline: Many<Long> = transactionally(block = fun(): Many<Long> {
+                    val innermost: Many<Long> = transactionally(block = fun(): Many<Long> {
+                        return database.modify("INSERT INTO sp_nest VALUES (3)").count()
+                            .flatMapMany { Many.error<Long>(RuntimeException("innermost fail")) }
+                    })
+                    val mid: Many<Long> = transactionally(block = fun(): Many<Long> {
+                        return database.modify("INSERT INTO sp_nest VALUES (2)").count()
+                            .flatMapMany { innermost.recover { Many.items(0L) } }
+                    })
+                    return database.modify("INSERT INTO sp_nest VALUES (1)").count()
+                        .flatMapMany { mid }
+                        .flatMap {
+                            database.query("SELECT count(*) AS n FROM sp_nest")
+                                .single().map { it.get<Long>("n") }.toMany()
+                        }
+                })
+                Verify.that(
+                    nestPipeline, context = PoolContext(pool),
+                ).assertNext { assertEquals(2L, it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            // --- Isolation levels ---
+
+            dynamicTest("READ COMMITTED isolation sent to server") {
+                Verify.that(
+                    transactionally {
+                        database.query("SHOW transaction_isolation").single()
+                            .map { it.get<String>("transaction_isolation") }.toMany()
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals("read committed", it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            dynamicTest("REPEATABLE READ isolation sent to server") {
+                Verify.that(
+                    transactionally(TransactionDefinition(isolation = IsolationLevel.RepeatableRead)) {
+                        database.query("SHOW transaction_isolation").single()
+                            .map { it.get<String>("transaction_isolation") }.toMany()
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals("repeatable read", it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            dynamicTest("SERIALIZABLE isolation sent to server") {
+                Verify.that(
+                    transactionally(TransactionDefinition(isolation = IsolationLevel.Serializable)) {
+                        database.query("SHOW transaction_isolation").single()
+                            .map { it.get<String>("transaction_isolation") }.toMany()
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals("serializable", it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            // --- Read-only ---
+
+            dynamicTest("READ ONLY transaction prevents writes") {
+                Verify.that(
+                    database.run("CREATE TABLE IF NOT EXISTS readonly_test (id int)").execute().then { database.run("DELETE FROM readonly_test").execute().toMany<Unit>() }, context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
+
+                Verify.that(
+                    transactionally(TransactionDefinition(mutability = TransactionMutability.ReadOnly)) {
+                        database.modify("INSERT INTO readonly_test VALUES (1)").count().toMany()
+                    }, context = PoolContext(pool),
+                ).completesWithError(within = TEST_TIMEOUT)
+            },
+
+            dynamicTest("DEFERRABLE SERIALIZABLE READ ONLY accepted by server") {
+                Verify.that(
+                    transactionally(TransactionDefinition(
+                        isolation  = IsolationLevel.Serializable,
+                        mutability = TransactionMutability.ReadOnly,
+                        deferrable = true,
+                    )) {
+                        database.query("SHOW transaction_isolation").single()
+                            .map { it.get<String>("transaction_isolation") }.toMany()
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals("serializable", it) }.completesNormally(within = TEST_TIMEOUT)
             },
 
             dynamicTest("stop container") {
-                runBlocking { pool?.close() }
+                Verify.that(pool.close()).completesNormally()
                 postgres.stop()
             },
-
-        ))
+        )
     }
 }

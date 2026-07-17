@@ -17,7 +17,7 @@ package se.oyabun.minamoto.postgres.codec
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializerOrNull
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.DatabaseException
 import java.util.ServiceLoader
 import kotlin.reflect.KClass
 import kotlin.reflect.KType
@@ -116,14 +116,14 @@ class CodecRegistry(
     /**
      * Returns the codec for [oid] + [type], applying numeric widening if no exact match exists.
      *
-     * Throws [MinamotoException.CodecFailed] when no codec can be found or widened to.
+     * Throws [DatabaseException.CodecFailed] when no codec can be found or widened to.
      */
     @Suppress("UNCHECKED_CAST")
     fun <T : Any> find(oid: Int, type: KClass<T>): Codec<T> {
         codecs[oid to type]?.let { return it as Codec<T> }
 
         val widened = widenedCodec(oid, type)
-            ?: throw MinamotoException.CodecFailed("no codec for OID $oid → ${type.simpleName}")
+            ?: throw DatabaseException.CodecFailed("no codec for OID $oid → ${type.simpleName}")
 
         return widened as Codec<T>
     }
@@ -138,7 +138,7 @@ class CodecRegistry(
         codecs.entries
             .firstOrNull { (key, _) -> key.second == type }
             ?.let { return it.value as Codec<T> }
-        throw MinamotoException.CodecFailed("no codec for type ${type.simpleName}")
+        throw DatabaseException.CodecFailed("no codec for type ${type.simpleName}")
     }
 
     private fun widenedCodec(oid: Int, target: KClass<*>): Codec<*>? {
@@ -177,7 +177,7 @@ class CodecRegistry(
 
     private fun <T : Any> requireSerializer(type: KClass<T>) =
         serializerOrNull(type.java)
-            ?: throw MinamotoException.CodecFailed(
+            ?: throw DatabaseException.CodecFailed(
                 "${type.simpleName} has no kotlinx.serialization serializer — annotate with @Serializable"
             )
 }

@@ -21,15 +21,18 @@ import se.oyabun.minamoto.ConnectionId
 
 internal inline fun Slf4jLogger.trace(message: () -> String) { if (isTraceEnabled) trace(message()) }
 internal inline fun Slf4jLogger.debug(message: () -> String) { if (isDebugEnabled) debug(message()) }
+internal inline fun Slf4jLogger.info(message: () -> String)  { if (isInfoEnabled)  info(message())  }
 internal inline fun Slf4jLogger.warn(message: () -> String)  { if (isWarnEnabled)  warn(message())  }
-internal inline fun Slf4jLogger.warn(cause: Throwable, message: () -> String) { if (isWarnEnabled) warn(message(), cause) }
+internal inline fun Slf4jLogger.warn(cause: Throwable, message: () -> String)  { if (isWarnEnabled)  warn(message(), cause)  }
 internal inline fun Slf4jLogger.error(cause: Throwable, message: () -> String) { if (isErrorEnabled) error(message(), cause) }
+internal inline fun Slf4jLogger.debug(cause: Throwable, message: () -> String) { if (isDebugEnabled) debug(message(), cause) }
 
 internal class Log(private val slf4j: Slf4jLogger) {
 
     val connection = Connection()
     val protocol   = Protocol()
     val pool       = Pool()
+    val query      = Query()
 
     inner class Connection {
         fun created(id: ConnectionId)                                = slf4j.debug { "connection created [$id]" }
@@ -60,6 +63,12 @@ internal class Log(private val slf4j: Slf4jLogger) {
         fun acquired(id: ConnectionId)                    = slf4j.debug { "acquired [$id]" }
         fun released(id: ConnectionId)                    = slf4j.debug { "released [$id]" }
         fun invalidated(id: ConnectionId, reason: String) = slf4j.warn { "invalidated [$id]: $reason" }
+    }
+
+    inner class Query {
+        fun usingTransactionConnection(id: ConnectionId) = slf4j.trace { "using transaction connection [$id]" }
+        fun acquiringConnection()                         = slf4j.trace { "no active transaction — acquiring connection" }
+        fun reusingConnection(id: ConnectionId)           = slf4j.trace { "reusing active connection [$id]" }
     }
 }
 

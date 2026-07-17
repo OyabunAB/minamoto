@@ -17,6 +17,8 @@ package se.oyabun.minamoto
 
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
+import se.oyabun.aelv.None
+import se.oyabun.aelv.One
 
 @JvmInline
 value class ConnectionId(val value: Long)
@@ -93,6 +95,18 @@ data class TransactionDefinition(
     val deferrable: Boolean               = false,
 )
 
+/**
+ * Carries the active [TransactionDefinition] in the coroutine context.
+ *
+ * Installed by callers that want all nested [transactionally] calls to use a specific
+ * isolation level, mutability, or deferrable setting without passing it explicitly.
+ * The innermost [TransactionDefinitionContext] wins.
+ */
+class TransactionDefinitionContext(val definition: TransactionDefinition) : kotlin.coroutines.CoroutineContext.Element {
+    override val key: kotlin.coroutines.CoroutineContext.Key<*> get() = TransactionDefinitionContext
+    companion object : kotlin.coroutines.CoroutineContext.Key<TransactionDefinitionContext>
+}
+
 sealed interface TransactionState {
     data object Active     : TransactionState
     data object Committed  : TransactionState
@@ -149,26 +163,26 @@ sealed interface ConnectionStack {
 interface Connection {
     val id:    ConnectionId
     val state: ConnectionState
-    suspend fun ping(): ValidationResult
-    suspend fun close()
+    fun ping(): One<ValidationResult>
+    fun close(): None<Unit>
 
     /** Send `BEGIN` with [definition]'s isolation level, mutability, and deferrable flag. */
-    suspend fun begin(definition: TransactionDefinition = TransactionDefinition())
+    fun begin(definition: TransactionDefinition = TransactionDefinition()): None<Unit>
 
     /** Send `COMMIT`. */
-    suspend fun commit()
+    fun commit(): None<Unit>
 
     /** Send `ROLLBACK`. */
-    suspend fun rollback()
+    fun rollback(): None<Unit>
 
     /** Send `SAVEPOINT [id]`. */
-    suspend fun savepoint(id: SavepointId)
+    fun savepoint(id: SavepointId): None<Unit>
 
     /** Send `RELEASE SAVEPOINT [id]`. */
-    suspend fun releaseSavepoint(id: SavepointId)
+    fun releaseSavepoint(id: SavepointId): None<Unit>
 
     /** Send `ROLLBACK TO SAVEPOINT [id]`. */
-    suspend fun rollbackToSavepoint(id: SavepointId)
+    fun rollbackToSavepoint(id: SavepointId): None<Unit>
 }
 
 /**
@@ -180,9 +194,9 @@ interface Connection {
  * [destroy] when evicting or shutting down.
  */
 interface ConnectionFactory {
-    suspend fun create(): Connection
-    suspend fun validate(connection: Connection): ValidationResult
-    suspend fun destroy(connection: Connection)
+    fun create(): One<Connection>
+    fun validate(connection: Connection): One<ValidationResult>
+    fun destroy(connection: Connection): None<Unit>
 }
 
 /**

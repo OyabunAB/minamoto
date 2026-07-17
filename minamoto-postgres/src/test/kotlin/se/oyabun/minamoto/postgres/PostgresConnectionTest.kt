@@ -1,96 +1,120 @@
 package se.oyabun.minamoto.postgres
 
-import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.DynamicContainer.dynamicContainer
+import org.junit.jupiter.api.DynamicNode
 import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
-import se.oyabun.aelv.await
+import se.oyabun.aelv.Verify
+import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.fold
-import se.oyabun.aelv.rightOrThrow
-import se.oyabun.minamoto.ConnectionAcquireResult
-import se.oyabun.minamoto.ConnectionState
-import se.oyabun.minamoto.Row
-import se.oyabun.minamoto.ValidationResult
+import se.oyabun.aelv.map
+import se.oyabun.minamoto.PoolContext
+import se.oyabun.minamoto.pool.MinamotoPool
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
+import kotlin.time.Duration.Companion.seconds
 
 class PostgresConnectionTest {
 
     companion object {
         val postgresImages = listOf(
-            "postgres:13-alpine@sha256:fb9065b6e3e213bdc07edd372a5b2a26245840b7fb65d1fd8b6700106d51805c",
-            "postgres:15-alpine@sha256:fceb6f86328c36f2438fae3b851b0cc57c4a7e69a58c866d9ce24281f2cf0c9c",
-            "postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609",
-            "postgres:18beta2-alpine@sha256:0164ef2cdce5fc6136d7de2cf9864bee88f593283608facace1e6460ba63ad0c",
+            "postgres:13-alpine",
+            "postgres:15-alpine",
+            "postgres:17-alpine",
+            "postgres:18beta2-alpine",
         )
-    }
-
-    private fun connectWithPool(postgres: PostgreSQLContainer): Pair<PostgresDatabase, se.oyabun.minamoto.pool.MinamotoPool> {
-        val database = PostgresDatabase(
-            ConnectionConfig(
-                host     = postgres.host,
-                port     = postgres.firstMappedPort,
-                user     = postgres.username,
-                password = postgres.password,
-                database = postgres.databaseName,
-            )
-        )
-        val pool = database.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 5, validation = ValidationQuery.None))
-        return Pair(database, pool)
     }
 
     @TestFactory
     fun `connection tests across postgres versions`() = postgresImages.map { image ->
         val postgres = PostgreSQLContainer(
             DockerImageName.parse(image).asCompatibleSubstituteFor("postgres")
-        )
-            .withDatabaseName("testdb")
-            .withUsername("testuser")
-            .withPassword("testpass")
+        ).withDatabaseName("testdb").withUsername("testuser").withPassword("testpass")
+        dynamicContainer(image, tests(postgres))
+    }
 
-        dynamicContainer(image, listOf(
+    private fun tests(postgres: PostgreSQLContainer): List<DynamicNode> {
+        lateinit var database: PostgresDatabase
+        lateinit var pool: MinamotoPool
+        return listOf(
 
-            dynamicTest("connects and authenticates") {
+            dynamicTest("start container") {
                 postgres.start()
-                val (_, pool) = connectWithPool(postgres)
-                runBlocking {
-                    val result = pool.acquire()
-                    assertIs<ConnectionAcquireResult.Acquired>(result)
-                    val connection = (result as ConnectionAcquireResult.Acquired).connection as PostgresConnection
-                    assertEquals(ConnectionState.Idle, connection.state)
-                    pool.release(connection.id)
-                }
+                database = PostgresDatabase(ConnectionConfig(
+                    host     = postgres.host,
+                    port     = postgres.firstMappedPort,
+                    user     = postgres.username,
+                    password = { postgres.password },
+                    database = postgres.databaseName,
+                ))
+                pool = database.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 5, validation = ValidationQuery.None))
             },
 
-            dynamicTest("ping returns valid") {
-                val (_, pool) = connectWithPool(postgres)
-                runBlocking {
-                    val result = pool.acquire()
-                    assertIs<ConnectionAcquireResult.Acquired>(result)
-                    val connection = (result as ConnectionAcquireResult.Acquired).connection as PostgresConnection
-                    val ping = connection.ping()
-                    connection.close()
-                    assertIs<ValidationResult.Valid>(ping)
-                }
+            dynamicTest("connects and returns result from simple query") {
+                Verify.that(
+                    database.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
             },
 
-            dynamicTest("query streams rows") {
-                val (database, pool) = connectWithPool(postgres)
-                val results = runBlocking {
-                    pool {
-                        database.query("SELECT 'hello' AS greeting UNION ALL SELECT 'world'")
-                            .bind().multiple()
-                            .fold(emptyList<String>()) { acc: List<String>, row: Row -> acc + row.get<String>("greeting") }
-                            .await().rightOrThrow()
-                    }
-                }
-                assertEquals(listOf("hello", "world"), results)
+            dynamicTest("query streams multiple rows") {
+                Verify.that(
+                    database.query("SELECT 'hello' AS greeting UNION ALL SELECT 'world'")
+                        .multiple()
+                        .fold(emptyList<String>()) { acc, row -> acc + row.get<String>("greeting") },
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(listOf("hello", "world"), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            dynamicTest("pool validates connection with SELECT 1") {
+                val dbWithValidation = PostgresDatabase(ConnectionConfig(
+                    host     = postgres.host,
+                    port     = postgres.firstMappedPort,
+                    user     = postgres.username,
+                    password = { postgres.password },
+                    database = postgres.databaseName,
+                ))
+                val validatingPool = dbWithValidation.pool(PoolConfig(
+                    initialSize = 1, minIdle = 1, maxSize = 3,
+                    validation  = ValidationQuery.Local,
+                ))
+                Verify.that(
+                    dbWithValidation.query("SELECT 42 AS n").single().map { it.get<Int>("n") },
+                    context = PoolContext(validatingPool),
+                ).assertNext { assertEquals(42, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(validatingPool.close()).completesNormally()
+            },
+
+            dynamicTest("bad credentials fail to connect") {
+                val badDatabase = PostgresDatabase(ConnectionConfig(
+                    host     = postgres.host,
+                    port     = postgres.firstMappedPort,
+                    user     = postgres.username,
+                    password = { "wrongpassword" },
+                    database = postgres.databaseName,
+                ))
+                val badPool = badDatabase.pool(PoolConfig(
+                    initialSize    = 0,
+                    minIdle        = 0,
+                    maxSize        = 1,
+                    acquireTimeout = 5.seconds,
+                    createTimeout  = 10.seconds,
+                    validation     = ValidationQuery.None,
+                ))
+                Verify.that(
+                    badDatabase.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
+                    context = PoolContext(badPool),
+                ).completesWithError(within = 15.seconds)
+                Verify.that(badPool.close()).completesNormally()
+            },
+
+            dynamicTest("stop container") {
+                Verify.that(pool.close()).completesNormally()
                 postgres.stop()
             },
-        ))
+        )
     }
 }

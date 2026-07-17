@@ -17,7 +17,7 @@ package se.oyabun.minamoto.postgres.codec
 
 import java.nio.ByteBuffer
 import kotlin.reflect.KClass
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.DatabaseException
 
 /**
  * Handles one-dimensional Postgres arrays in binary format.
@@ -25,7 +25,7 @@ import se.oyabun.minamoto.MinamotoException
  * Wire layout: int32 ndim, int32 hasNulls flag, int32 elementOid, then per-dimension
  * int32 length + int32 lbound, then per-element int32 length (-1 = null) + bytes.
  *
- * Null elements are not supported — [se.oyabun.minamoto.MinamotoException.CodecFailed]
+ * Null elements are not supported — [se.oyabun.minamoto.DatabaseException.CodecFailed]
  * is thrown if the server sends one. Multi-dimensional arrays are rejected by checking ndim.
  */
 internal class ArrayCodec<T : Any>(
@@ -68,7 +68,7 @@ internal class ArrayCodec<T : Any>(
         val result = ArrayList<T>(size)
         repeat(size) { index ->
             val length = buffer.int
-            if (length == -1) throw MinamotoException.CodecFailed(
+            if (length == -1) throw DatabaseException.CodecFailed(
                 "null element at index $index in array OID $sourceOid — use getOrNull or handle nulls before storing in arrays"
             )
             val elementBytes = ByteArray(length)

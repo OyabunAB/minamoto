@@ -18,6 +18,9 @@ package se.oyabun.minamoto.pool
 import se.oyabun.minamoto.Connection
 import se.oyabun.minamoto.ConnectionFactory
 import se.oyabun.minamoto.ConnectionId
+import se.oyabun.minamoto.ConnectionPool
+import se.oyabun.aelv.None
+import se.oyabun.aelv.One
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -194,7 +197,7 @@ sealed interface AcquireResult {
  * whether the current coroutine chain already holds all available connections, preventing
  * self-deadlocks in recursive [se.oyabun.aelv.Many.flatMap] pipelines.
  */
-interface ManagedPool : se.oyabun.minamoto.ConnectionPool {
+interface ManagedPool : ConnectionPool {
 
     val config:     PoolConfig
     val statistics: PoolStatistics
@@ -202,22 +205,15 @@ interface ManagedPool : se.oyabun.minamoto.ConnectionPool {
     /**
      * Acquire a connection slot.
      *
-     * Suspends until a slot is available or [PoolConfig.acquireTimeout] elapses.
      * Validates the connection before returning if [PoolConfig.validation] is not [ValidationQuery.None].
      * Runs [PoolConfig.postAllocate] before returning — a failure invalidates the slot and throws.
      */
-    suspend fun acquireSlot(): AcquireResult
+    fun acquireSlot(): One<AcquireResult>
 
-    /**
-     * Return a slot to the pool.
-     *
-     * Runs [PoolConfig.preRelease] first — a failure invalidates rather than returning the slot.
-     * Slots past [PoolConfig.maxLifetime] or [PoolConfig.idleTimeout] are evicted rather than returned.
-     */
     /** Returns the [Connection] for [id] if it is currently acquired by this pool, or null if not found. */
-    fun connectionFor(id: se.oyabun.minamoto.ConnectionId): se.oyabun.minamoto.Connection?
+    fun connectionFor(id: ConnectionId): Connection?
 
-    override suspend fun release(id: ConnectionId)
+    override fun release(id: ConnectionId): None<Unit>
 
     /**
      * Discard a slot permanently.
@@ -225,8 +221,8 @@ interface ManagedPool : se.oyabun.minamoto.ConnectionPool {
      * The underlying connection is destroyed. A replacement is created asynchronously
      * if [PoolConfig.minIdle] requires one.
      */
-    suspend fun invalidate(id: ConnectionId)
+    fun invalidate(id: ConnectionId): None<Unit>
 
     /** Close all connections and shut down the pool. In-progress acquisitions receive [AcquireResult.TimedOut]. */
-    suspend fun close()
+    fun close(): None<Unit>
 }

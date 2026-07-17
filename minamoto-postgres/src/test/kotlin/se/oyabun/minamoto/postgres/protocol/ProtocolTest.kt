@@ -16,6 +16,9 @@
 package se.oyabun.minamoto.postgres.protocol
 
 import io.netty.buffer.Unpooled
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.Verify
+import se.oyabun.aelv.fold
 import se.oyabun.minamoto.postgres.protocol.Authentication
 import se.oyabun.minamoto.postgres.protocol.TransactionStatus
 import kotlin.test.Test
@@ -222,14 +225,14 @@ class FramerTest {
     }
 
     @Test
-    fun `frames single complete message`() = kotlinx.coroutines.runBlocking {
+    fun `frames single complete message`() {
         val messageBytes = buildMessage('Z', byteArrayOf('I'.code.toByte()))
-        val input  = se.oyabun.aelv.Many.items(
+        val input  = Many.items(
             Unpooled.wrappedBuffer(messageBytes)
         )
         val framed = input.framed(allocator)
 
-        se.oyabun.aelv.Verify.that(framed)
+        Verify.that(framed)
             .assertNext { buffer ->
                 assertEquals('Z'.code.toByte(), buffer.getByte(0))
                 buffer.release()
@@ -238,31 +241,32 @@ class FramerTest {
     }
 
     @Test
-    fun `frames two messages from one chunk`() = kotlinx.coroutines.runBlocking {
+    fun `frames two messages from one chunk`() {
         val message1 = buildMessage('1', byteArrayOf())
         val message2 = buildMessage('2', byteArrayOf())
         val combined = Unpooled.wrappedBuffer(message1 + message2)
-        val input    = se.oyabun.aelv.Many.items(combined)
+        val input    = Many.items(combined)
         val framed   = input.framed(allocator)
 
-        se.oyabun.aelv.Verify.that(framed)
-            .assertNext { buffer -> assertEquals('1'.code.toByte(), buffer.getByte(0)); buffer.release() }
-            .assertNext { buffer -> assertEquals('2'.code.toByte(), buffer.getByte(0)); buffer.release() }
-            .completesNormally()
+        Verify.that(
+            framed.fold(emptyList<Byte>()) { acc, buf -> acc + buf.getByte(0) }
+        ).assertNext { bytes ->
+            assertEquals(listOf('1'.code.toByte(), '2'.code.toByte()), bytes)
+        }.completesNormally()
     }
 
     @Test
-    fun `frames message split across two chunks`() = kotlinx.coroutines.runBlocking {
+    fun `frames message split across two chunks`() {
         val messageBytes = buildMessage('Z', byteArrayOf('I'.code.toByte()))
         val firstHalf    = messageBytes.copyOf(3)
         val secondHalf   = messageBytes.copyOfRange(3, messageBytes.size)
-        val input        = se.oyabun.aelv.Many.items(
+        val input        = Many.items(
             Unpooled.wrappedBuffer(firstHalf),
             Unpooled.wrappedBuffer(secondHalf),
         )
         val framed = input.framed(allocator)
 
-        se.oyabun.aelv.Verify.that(framed)
+        Verify.that(framed)
             .assertNext { buffer ->
                 assertEquals(messageBytes.size, buffer.readableBytes())
                 buffer.release()

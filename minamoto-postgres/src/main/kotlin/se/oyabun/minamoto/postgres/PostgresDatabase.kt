@@ -56,8 +56,8 @@ class PostgresDatabase(
         )
 
     override fun query(statement: String)   = PostgresQuery(registry, statement)
-    override fun command(statement: String) = PostgresCommand(registry, statement)
-    override fun effect(statement: String)  = PostgresEffect(registry, statement)
+    override fun modify(statement: String) = PostgresModify(registry, statement)
+    override fun run(statement: String)  = PostgresRun(registry, statement)
 }
 
 /** Builds the `BEGIN` SQL statement from a [TransactionDefinition]. */

@@ -1,27 +1,28 @@
 package se.oyabun.minamoto.postgres
 
-import kotlinx.coroutines.runBlocking
 import kotlinx.datetime.Instant
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.LocalTime
+import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.DynamicContainer.dynamicContainer
+import org.junit.jupiter.api.DynamicNode
 import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
+import se.oyabun.aelv.Many
 import se.oyabun.aelv.Verify
-import se.oyabun.aelv.await
-import se.oyabun.aelv.fold
-import se.oyabun.aelv.map
 import se.oyabun.aelv.flatMap
-import se.oyabun.aelv.getOrThrow
-import se.oyabun.minamoto.Binding
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.aelv.map
+import se.oyabun.aelv.toMany
+import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
+import se.oyabun.minamoto.transactionally
 import se.oyabun.minamoto.pool.MinamotoPool
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
+import se.oyabun.minamoto.postgres.codec.CodecRegistry
 import java.math.BigDecimal
 import java.time.OffsetTime
 import java.time.ZoneOffset
@@ -37,42 +38,14 @@ class CodecIntegrationTest {
 
     companion object {
         val postgresImages = listOf(
-            "postgres:13-alpine@sha256:fb9065b6e3e213bdc07edd372a5b2a26245840b7fb65d1fd8b6700106d51805c",
-            "postgres:15-alpine@sha256:fceb6f86328c36f2438fae3b851b0cc57c4a7e69a58c866d9ce24281f2cf0c9c",
-            "postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609",
-            "postgres:18beta2-alpine@sha256:0164ef2cdce5fc6136d7de2cf9864bee88f593283608facace1e6460ba63ad0c",
+            "postgres:13-alpine",
+            "postgres:15-alpine",
+            "postgres:17-alpine",
+            "postgres:18beta2-alpine",
         )
-    }
 
-    private inline fun <reified T : Any> scalar(
-        noinline database:  () -> PostgresDatabase,
-        noinline pool:      () -> MinamotoPool,
-        label:     String,
-        statement: String,
-        column:    String,
-        noinline assertion: (T) -> Unit,
-    ) = dynamicTest(label) {
-        Verify.that(
-            database().query(statement).single().map { row -> row.get(column, T::class) },
-            timeout = 30.seconds,
-            context = PoolContext(pool()),
-        ).assertNext { assertion(it) }.completesNormally()
-    }
-
-    private inline fun <reified T : Any> param(
-        noinline database:  () -> PostgresDatabase,
-        noinline pool:      () -> MinamotoPool,
-        label:     String,
-        statement: String,
-        binding:   Binding,
-        column:    String,
-        noinline assertion: (T) -> Unit,
-    ) = dynamicTest(label) {
-        Verify.that(
-            database().query(statement).bind(binding).single().map { row -> row.get(column, T::class) },
-            timeout = 30.seconds,
-            context = PoolContext(pool()),
-        ).assertNext { assertion(it) }.completesNormally()
+        @Serializable
+        data class Payload(val id: Int, val name: String)
     }
 
     @TestFactory
@@ -80,192 +53,342 @@ class CodecIntegrationTest {
         val postgres = PostgreSQLContainer(
             DockerImageName.parse(image).asCompatibleSubstituteFor("postgres")
         ).withDatabaseName("testdb").withUsername("testuser").withPassword("testpass")
+        dynamicContainer(image, tests(postgres))
+    }
 
-        var database: PostgresDatabase? = null
-        var pool: MinamotoPool? = null
-
-        dynamicContainer(image, listOf(
+    private fun tests(postgres: PostgreSQLContainer): List<DynamicNode> {
+        lateinit var database: PostgresDatabase
+        lateinit var pool: MinamotoPool
+        return listOf(
 
             dynamicTest("start container") {
                 postgres.start()
-                database = PostgresDatabase(
-                    ConnectionConfig(
-                        host     = postgres.host,
-                        port     = postgres.firstMappedPort,
-                        user     = postgres.username,
-                        password = postgres.password,
-                        database = postgres.databaseName,
-                    )
-                )
-                pool = database!!.pool(PoolConfig(initialSize = 2, minIdle = 2, maxSize = 5, validation = ValidationQuery.None))
+                database = PostgresDatabase(ConnectionConfig(
+                    host     = postgres.host,
+                    port     = postgres.firstMappedPort,
+                    user     = postgres.username,
+                    password = { postgres.password },
+                    database = postgres.databaseName,
+                ))
+                pool = database.pool(PoolConfig(initialSize = 2, minIdle = 2, maxSize = 5, validation = ValidationQuery.None))
             },
 
-            scalar<Boolean>({ database!! }, { pool!! }, "bool column decoded as Boolean",
-                "SELECT true::bool AS v", "v") { assertEquals(true, it) },
-            scalar<Short>({ database!! }, { pool!! }, "int2 column decoded as Short",
-                "SELECT 32767::int2 AS v", "v") { assertEquals(Short.MAX_VALUE, it) },
-            scalar<Int>({ database!! }, { pool!! }, "int4 column decoded as Int",
-                "SELECT 2147483647::int4 AS v", "v") { assertEquals(Int.MAX_VALUE, it) },
-            scalar<Long>({ database!! }, { pool!! }, "int8 column decoded as Long",
-                "SELECT 9223372036854775807::int8 AS v", "v") { assertEquals(Long.MAX_VALUE, it) },
-            scalar<Long>({ database!! }, { pool!! }, "int4 column widened to Long",
-                "SELECT 42::int4 AS v", "v") { assertEquals(42L, it) },
-            scalar<Int>({ database!! }, { pool!! }, "int2 column widened to Int",
-                "SELECT 7::int2 AS v", "v") { assertEquals(7, it) },
-            scalar<Float>({ database!! }, { pool!! }, "float4 column decoded as Float",
-                "SELECT 3.14::float4 AS v", "v") { assertEquals(3.14f, it, 0.001f) },
-            scalar<Double>({ database!! }, { pool!! }, "float8 column decoded as Double",
-                "SELECT 3.141592653589793::float8 AS v", "v") { assertEquals(3.141592653589793, it, 1e-9) },
-            scalar<Double>({ database!! }, { pool!! }, "float4 column widened to Double",
-                "SELECT 1.5::float4 AS v", "v") { assertEquals(1.5, it, 0.001) },
-            scalar<BigDecimal>({ database!! }, { pool!! }, "numeric column decoded as BigDecimal",
-                "SELECT 123.45::numeric AS v", "v") { assertEquals(BigDecimal("123.45"), it) },
-            scalar<String>({ database!! }, { pool!! }, "text column decoded as String",
-                "SELECT 'hello'::text AS v", "v") { assertEquals("hello", it) },
-            scalar<String>({ database!! }, { pool!! }, "varchar column decoded as String",
-                "SELECT 'world'::varchar(10) AS v", "v") { assertEquals("world", it) },
-            scalar<String>({ database!! }, { pool!! }, "bpchar column decoded as String",
-                "SELECT 'x'::bpchar AS v", "v") { assertEquals("x", it.trim()) },
-            scalar<ByteArray>({ database!! }, { pool!! }, "bytea column decoded as ByteArray",
-                "SELECT '\\xDEADBEEF'::bytea AS v", "v") {
-                assertEquals(
-                    listOf<Byte>(0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte()),
-                    it.toList(),
-                )
+            // --- Scalar decoding ---
+
+            dynamicTest("bool column decoded as Boolean") {
+                Verify.that(
+                    database.query("SELECT true::bool AS v").single().map { it.get<Boolean>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(true, it) }.completesNormally(within = TEST_TIMEOUT)
             },
-            scalar<UUID>({ database!! }, { pool!! }, "uuid column decoded as UUID",
-                "SELECT '550e8400-e29b-41d4-a716-446655440000'::uuid AS v", "v") {
-                assertEquals(UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), it)
+            dynamicTest("int2 column decoded as Short") {
+                Verify.that(
+                    database.query("SELECT 32767::int2 AS v").single().map { it.get<Short>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(Short.MAX_VALUE, it) }.completesNormally(within = TEST_TIMEOUT)
             },
-            scalar<LocalDate>({ database!! }, { pool!! }, "date column decoded as LocalDate",
-                "SELECT '2026-07-14'::date AS v", "v") { assertEquals(LocalDate(2026, 7, 14), it) },
-            scalar<LocalTime>({ database!! }, { pool!! }, "time column decoded as LocalTime",
-                "SELECT '10:30:00'::time AS v", "v") { assertEquals(LocalTime(10, 30, 0), it) },
-            scalar<OffsetTime>({ database!! }, { pool!! }, "timetz column decoded as OffsetTime",
-                "SELECT '14:30:00+02:00'::timetz AS v", "v") {
-                assertEquals(OffsetTime.of(14, 30, 0, 0, ZoneOffset.ofHours(2)), it)
+            dynamicTest("int4 column decoded as Int") {
+                Verify.that(
+                    database.query("SELECT 2147483647::int4 AS v").single().map { it.get<Int>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(Int.MAX_VALUE, it) }.completesNormally(within = TEST_TIMEOUT)
             },
-            scalar<LocalDateTime>({ database!! }, { pool!! }, "timestamp column decoded as LocalDateTime",
-                "SELECT '2026-07-14T10:00:00'::timestamp AS v", "v") {
-                assertEquals(LocalDateTime(2026, 7, 14, 10, 0, 0), it)
+            dynamicTest("int8 column decoded as Long") {
+                Verify.that(
+                    database.query("SELECT 9223372036854775807::int8 AS v").single().map { it.get<Long>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(Long.MAX_VALUE, it) }.completesNormally(within = TEST_TIMEOUT)
             },
-            scalar<Instant>({ database!! }, { pool!! }, "timestamptz column decoded as Instant",
-                "SELECT '2026-07-14T10:00:00Z'::timestamptz AS v", "v") {
-                assertEquals(Instant.parse("2026-07-14T10:00:00Z"), it)
+            dynamicTest("int4 column widened to Long") {
+                Verify.that(
+                    database.query("SELECT 42::int4 AS v").single().map { it.get<Long>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(42L, it) }.completesNormally(within = TEST_TIMEOUT)
             },
-            scalar<kotlin.time.Duration>({ database!! }, { pool!! }, "interval column decoded as Duration",
-                "SELECT '2 hours 30 minutes'::interval AS v", "v") {
-                assertEquals(2.hours + 30.minutes, it)
+            dynamicTest("int2 column widened to Int") {
+                Verify.that(
+                    database.query("SELECT 7::int2 AS v").single().map { it.get<Int>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(7, it) }.completesNormally(within = TEST_TIMEOUT)
             },
+            dynamicTest("float4 column decoded as Float") {
+                Verify.that(
+                    database.query("SELECT 3.14::float4 AS v").single().map { it.get<Float>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(3.14f, it, 0.001f) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("float8 column decoded as Double") {
+                Verify.that(
+                    database.query("SELECT 3.141592653589793::float8 AS v").single().map { it.get<Double>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(3.141592653589793, it, 1e-9) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("float4 column widened to Double") {
+                Verify.that(
+                    database.query("SELECT 1.5::float4 AS v").single().map { it.get<Double>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(1.5, it, 0.001) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("numeric column decoded as BigDecimal") {
+                Verify.that(
+                    database.query("SELECT 123.45::numeric AS v").single().map { it.get<BigDecimal>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(BigDecimal("123.45"), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("text column decoded as String") {
+                Verify.that(
+                    database.query("SELECT 'hello'::text AS v").single().map { it.get<String>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals("hello", it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("varchar column decoded as String") {
+                Verify.that(
+                    database.query("SELECT 'world'::varchar(10) AS v").single().map { it.get<String>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals("world", it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("bpchar column decoded as String") {
+                Verify.that(
+                    database.query("SELECT 'x'::bpchar AS v").single().map { it.get<String>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals("x", it.trim()) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("bytea column decoded as ByteArray") {
+                Verify.that(
+                    database.query("SELECT '\\xDEADBEEF'::bytea AS v").single().map { it.get<ByteArray>("v") }, context = PoolContext(pool),
+                ).assertNext {
+                    assertEquals(
+                        listOf<Byte>(0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte()),
+                        it.toList(),
+                    )
+                }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("uuid column decoded as UUID") {
+                Verify.that(
+                    database.query("SELECT '550e8400-e29b-41d4-a716-446655440000'::uuid AS v")
+                        .single().map { it.get<UUID>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("date column decoded as LocalDate") {
+                Verify.that(
+                    database.query("SELECT '2026-07-14'::date AS v").single().map { it.get<LocalDate>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(LocalDate(2026, 7, 14), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("time column decoded as LocalTime") {
+                Verify.that(
+                    database.query("SELECT '10:30:00'::time AS v").single().map { it.get<LocalTime>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(LocalTime(10, 30, 0), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("timetz column decoded as OffsetTime") {
+                Verify.that(
+                    database.query("SELECT '14:30:00+02:00'::timetz AS v").single().map { it.get<OffsetTime>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(OffsetTime.of(14, 30, 0, 0, ZoneOffset.ofHours(2)), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("timestamp column decoded as LocalDateTime") {
+                Verify.that(
+                    database.query("SELECT '2026-07-14T10:00:00'::timestamp AS v").single().map { it.get<LocalDateTime>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(LocalDateTime(2026, 7, 14, 10, 0, 0), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("timestamptz column decoded as Instant") {
+                Verify.that(
+                    database.query("SELECT '2026-07-14T10:00:00Z'::timestamptz AS v").single().map { it.get<Instant>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(Instant.parse("2026-07-14T10:00:00Z"), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("interval column decoded as Duration") {
+                Verify.that(
+                    database.query("SELECT '2 hours 30 minutes'::interval AS v").single().map { it.get<kotlin.time.Duration>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(2.hours + 30.minutes, it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            // --- Null handling ---
 
             dynamicTest("SQL NULL with getOrNull returns null") {
-                runBlocking {
-                    pool!! {
-                        val result = database!!.query("SELECT NULL::text AS v").single().await()
-                        assertNull(result.getOrThrow().getOrNull<String>("v"))
-                    }
-                }
+                Verify.that(
+                    database.query("SELECT NULL::text AS v").single(), context = PoolContext(pool),
+                ).assertNext { row -> assertNull(row.getOrNull<String>("v")) }.completesNormally(within = TEST_TIMEOUT)
             },
-
             dynamicTest("SQL NULL with get throws UnexpectedNull") {
                 val error = Verify.that(
-                    database!!.query("SELECT NULL::text AS v").single()
-                        .map { row -> row.get<String>("v") },
-                    context = PoolContext(pool!!),
-                ).completesWithError()
-                assertIs<MinamotoException.UnexpectedNull>(error)
+                    database.query("SELECT NULL::text AS v").single().map { row -> row.get<String>("v") }, context = PoolContext(pool),
+                ).completesWithError(within = TEST_TIMEOUT)
+                assertIs<DatabaseException.UnexpectedNull>(error)
             },
-
             dynamicTest("non-null value with getOrNull returns value") {
-                runBlocking {
-                    pool!! {
-                        val result = database!!.query("SELECT 'hello'::text AS v").single().await()
-                        assertEquals("hello", result.getOrThrow().getOrNull<String>("v"))
-                    }
-                }
+                Verify.that(
+                    database.query("SELECT 'hello'::text AS v").single(), context = PoolContext(pool),
+                ).assertNext { row -> assertEquals("hello", row.getOrNull<String>("v")) }.completesNormally(within = TEST_TIMEOUT)
             },
 
-            param<Boolean>({ database!! }, { pool!! }, "Boolean parameter round-tripped",
-                "SELECT :v::bool AS v", "v" to true, "v") { assertEquals(true, it) },
-            param<Int>({ database!! }, { pool!! }, "Int parameter round-tripped",
-                "SELECT :v::int4 AS v", "v" to 42, "v") { assertEquals(42, it) },
-            param<Long>({ database!! }, { pool!! }, "Long parameter round-tripped",
-                "SELECT :v::int8 AS v", "v" to 9999L, "v") { assertEquals(9999L, it) },
-            param<Double>({ database!! }, { pool!! }, "Double parameter round-tripped",
-                "SELECT :v::float8 AS v", "v" to 3.14, "v") { assertEquals(3.14, it, 1e-9) },
-            param<String>({ database!! }, { pool!! }, "String parameter round-tripped",
-                "SELECT :v::text AS v", "v" to "minamoto", "v") { assertEquals("minamoto", it) },
-            param<UUID>({ database!! }, { pool!! }, "UUID parameter round-tripped",
-                "SELECT :v::uuid AS v",
-                "v" to UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), "v") {
-                assertEquals(UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), it)
+            // --- Parameter binding ---
+
+            dynamicTest("Boolean parameter round-tripped") {
+                Verify.that(
+                    database.query("SELECT :v::bool AS v").bind("v" to true).single().map { it.get<Boolean>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(true, it) }.completesNormally(within = TEST_TIMEOUT)
             },
-            param<LocalDate>({ database!! }, { pool!! }, "LocalDate parameter round-tripped",
-                "SELECT :v::date AS v", "v" to LocalDate(2026, 7, 14), "v") {
-                assertEquals(LocalDate(2026, 7, 14), it)
+            dynamicTest("Int parameter round-tripped") {
+                Verify.that(
+                    database.query("SELECT :v::int4 AS v").bind("v" to 42).single().map { it.get<Int>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(42, it) }.completesNormally(within = TEST_TIMEOUT)
             },
-            param<LocalTime>({ database!! }, { pool!! }, "LocalTime parameter round-tripped",
-                "SELECT :v::time AS v", "v" to LocalTime(10, 30, 0), "v") {
-                assertEquals(LocalTime(10, 30, 0), it)
+            dynamicTest("Long parameter round-tripped") {
+                Verify.that(
+                    database.query("SELECT :v::int8 AS v").bind("v" to 9999L).single().map { it.get<Long>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(9999L, it) }.completesNormally(within = TEST_TIMEOUT)
             },
-            param<LocalDateTime>({ database!! }, { pool!! }, "LocalDateTime parameter round-tripped",
-                "SELECT :v::timestamp AS v", "v" to LocalDateTime(2026, 7, 14, 10, 0, 0), "v") {
-                assertEquals(LocalDateTime(2026, 7, 14, 10, 0, 0), it)
+            dynamicTest("Double parameter round-tripped") {
+                Verify.that(
+                    database.query("SELECT :v::float8 AS v").bind("v" to 3.14).single().map { it.get<Double>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(3.14, it, 1e-9) }.completesNormally(within = TEST_TIMEOUT)
             },
-            param<Instant>({ database!! }, { pool!! }, "Instant parameter round-tripped",
-                "SELECT :v::timestamptz AS v", "v" to Instant.parse("2026-07-14T10:00:00Z"), "v") {
-                assertEquals(Instant.parse("2026-07-14T10:00:00Z"), it)
+            dynamicTest("String parameter round-tripped") {
+                Verify.that(
+                    database.query("SELECT :v::text AS v").bind("v" to "minamoto").single().map { it.get<String>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals("minamoto", it) }.completesNormally(within = TEST_TIMEOUT)
             },
+            dynamicTest("UUID parameter round-tripped") {
+                val uuid = UUID.fromString("550e8400-e29b-41d4-a716-446655440000")
+                Verify.that(
+                    database.query("SELECT :v::uuid AS v").bind("v" to uuid).single().map { it.get<UUID>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(uuid, it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("LocalDate parameter round-tripped") {
+                Verify.that(
+                    database.query("SELECT :v::date AS v").bind("v" to LocalDate(2026, 7, 14)).single().map { it.get<LocalDate>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(LocalDate(2026, 7, 14), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("LocalTime parameter round-tripped") {
+                Verify.that(
+                    database.query("SELECT :v::time AS v").bind("v" to LocalTime(10, 30, 0)).single().map { it.get<LocalTime>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(LocalTime(10, 30, 0), it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("LocalDateTime parameter round-tripped") {
+                val dt = LocalDateTime(2026, 7, 14, 10, 0, 0)
+                Verify.that(
+                    database.query("SELECT :v::timestamp AS v").bind("v" to dt).single().map { it.get<LocalDateTime>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(dt, it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("Instant parameter round-tripped") {
+                val instant = Instant.parse("2026-07-14T10:00:00Z")
+                Verify.that(
+                    database.query("SELECT :v::timestamptz AS v").bind("v" to instant).single().map { it.get<Instant>("v") }, context = PoolContext(pool),
+                ).assertNext { assertEquals(instant, it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+
+            // --- DML row counts ---
 
             dynamicTest("INSERT returns rowsUpdated = 1") {
-                runBlocking {
-                    pool!!.transactionally<Unit> {
-                        database!!.command("CREATE TEMP TABLE IF NOT EXISTS rows_test (id int)").count().await().getOrThrow()
-                        val count = database!!.command("INSERT INTO rows_test VALUES (1)").count().await().getOrThrow()
-                        assertEquals(1L, count)
-                    }
-                }
+                Verify.that(
+                    transactionally {
+                        database.modify("CREATE TEMP TABLE IF NOT EXISTS rows_test (id int)").count()
+                            .flatMap { database.modify("INSERT INTO rows_test VALUES (1)").count() }
+                            .toMany()
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(1L, it) }.completesNormally(within = TEST_TIMEOUT)
+            },
+            dynamicTest("DELETE returns rowsUpdated = 0 when no rows matched") {
+                Verify.that(
+                    transactionally {
+                        database.modify("CREATE TEMP TABLE IF NOT EXISTS empty_test (id int)").count()
+                            .flatMap { database.modify("DELETE FROM empty_test WHERE id = 999").count() }
+                            .toMany()
+                    }, context = PoolContext(pool),
+                ).assertNext { assertEquals(0L, it) }.completesNormally(within = TEST_TIMEOUT)
             },
 
-            dynamicTest("DELETE returns rowsUpdated = 0 when no rows matched") {
-                runBlocking {
-                    pool!!.transactionally<Unit> {
-                        database!!.command("CREATE TEMP TABLE IF NOT EXISTS empty_test (id int)").count().await().getOrThrow()
-                        val count = database!!.command("DELETE FROM empty_test WHERE id = 999").count().await().getOrThrow()
-                        assertEquals(0L, count)
-                    }
-                }
-            },
+            // --- Server errors surface typed exceptions ---
 
             dynamicTest("server error surfaces UndefinedTable for unknown table") {
                 val error = Verify.that(
-                    database!!.query("SELECT * FROM nonexistent_table_xyz")
-                        .multiple()
-                        .fold(emptyList<Any>()) { acc, _ -> acc },
-                    context = PoolContext(pool!!),
-                ).completesWithError()
-                assertIs<MinamotoException.UndefinedTable>(error)
+                    database.query("SELECT * FROM nonexistent_table_xyz").multiple(), context = PoolContext(pool),
+                ).completesWithError(within = TEST_TIMEOUT)
+                assertIs<DatabaseException.UndefinedTable>(error)
+            },
+            dynamicTest("unique constraint violation surfaces UniqueViolation") {
+                val error = Verify.that(
+                    transactionally {
+                        database.modify("CREATE TEMP TABLE IF NOT EXISTS uniq_test (id int PRIMARY KEY)").count()
+                            .flatMap { database.modify("INSERT INTO uniq_test VALUES (1)").count() }
+                            .flatMap { database.modify("INSERT INTO uniq_test VALUES (1)").count() }
+                            .toMany()
+                    }, context = PoolContext(pool),
+                ).completesWithError(within = TEST_TIMEOUT)
+                assertIs<DatabaseException.UniqueViolation>(error)
             },
 
-            dynamicTest("unique constraint violation surfaces UniqueViolation") {
-                val error = runBlocking {
-                    runCatching {
-                        pool!!.transactionally {
-                            database!!.command("CREATE TEMP TABLE IF NOT EXISTS uniq_test (id int PRIMARY KEY)").count()
-                                .flatMap { database!!.command("INSERT INTO uniq_test VALUES (1)").count() }
-                                .flatMap { database!!.command("INSERT INTO uniq_test VALUES (1)").count() }
-                                .await().getOrThrow()
-                        }
-                    }.exceptionOrNull()
-                }
-                assertIs<MinamotoException.UniqueViolation>(error)
+            // --- JSON codecs ---
+
+            dynamicTest("json column decoded as @Serializable data class") {
+                val registry = CodecRegistry()
+                registry.registerJson<Payload>()
+                val db = PostgresDatabase(
+                    config   = ConnectionConfig(
+                        host     = postgres.host,
+                        port     = postgres.firstMappedPort,
+                        user     = postgres.username,
+                        password = { postgres.password },
+                        database = postgres.databaseName,
+                    ),
+                    registry = registry,
+                )
+                val p = db.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 3, validation = ValidationQuery.None))
+                Verify.that(
+                    db.query("SELECT '{\"id\":1,\"name\":\"walter\"}'::json AS v")
+                        .single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
+                ).assertNext { assertEquals(Payload(1, "walter"), it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
+            },
+            dynamicTest("jsonb column decoded as @Serializable data class") {
+                val registry = CodecRegistry()
+                registry.registerJsonb<Payload>()
+                val db = PostgresDatabase(
+                    config   = ConnectionConfig(
+                        host     = postgres.host,
+                        port     = postgres.firstMappedPort,
+                        user     = postgres.username,
+                        password = { postgres.password },
+                        database = postgres.databaseName,
+                    ),
+                    registry = registry,
+                )
+                val p = db.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 3, validation = ValidationQuery.None))
+                Verify.that(
+                    db.query("SELECT '{\"id\":2,\"name\":\"jesse\"}'::jsonb AS v")
+                        .single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
+                ).assertNext { assertEquals(Payload(2, "jesse"), it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
+            },
+            dynamicTest("@Serializable parameter encoded into json column") {
+                val registry = CodecRegistry()
+                registry.registerJson<Payload>()
+                val payload = Payload(3, "skyler")
+                val db = PostgresDatabase(
+                    config   = ConnectionConfig(
+                        host     = postgres.host,
+                        port     = postgres.firstMappedPort,
+                        user     = postgres.username,
+                        password = { postgres.password },
+                        database = postgres.databaseName,
+                    ),
+                    registry = registry,
+                )
+                val p = db.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 3, validation = ValidationQuery.None))
+                Verify.that(
+                    db.query("SELECT :v::json AS v").bind("v" to payload).single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
+                ).assertNext { assertEquals(payload, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
+            },
+            dynamicTest("json null column returns null via getOrNull") {
+                val registry = CodecRegistry()
+                registry.registerJson<Payload>()
+                val db = PostgresDatabase(
+                    config   = ConnectionConfig(
+                        host     = postgres.host,
+                        port     = postgres.firstMappedPort,
+                        user     = postgres.username,
+                        password = { postgres.password },
+                        database = postgres.databaseName,
+                    ),
+                    registry = registry,
+                )
+                val p = db.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 3, validation = ValidationQuery.None))
+                Verify.that(
+                    db.query("SELECT NULL::json AS v").single(), context = PoolContext(p),
+                ).assertNext { row -> assertNull(row.getOrNull<Payload>("v")) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completesNormally()
             },
 
             dynamicTest("stop container") {
-                runBlocking { pool?.close() }
+                Verify.that(pool.close()).completesNormally()
                 postgres.stop()
             },
-
-        ))
+        )
     }
 }

@@ -22,7 +22,7 @@ import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.discard
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.fold
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.Row
 import se.oyabun.minamoto.postgres.Column
 import se.oyabun.minamoto.postgres.Parameter
@@ -171,18 +171,18 @@ private fun PostgresConnection.buildRow(
     return PostgresRow(columns, registry)
 }
 
-private fun ErrorResponse.asException(): MinamotoException = when (sqlState) {
-    "23505" -> MinamotoException.UniqueViolation(message, sqlState, detail, hint)
-    "23503" -> MinamotoException.ForeignKeyViolation(message, sqlState, detail, hint)
-    "23502" -> MinamotoException.NotNullViolation(message, sqlState, detail)
-    "23514" -> MinamotoException.CheckViolation(message, sqlState, detail)
-    "40001" -> MinamotoException.SerializationFailure(message)
-    "40P01" -> MinamotoException.ServerDeadlockDetected(message)
-    "57014" -> MinamotoException.QueryCancelled(message)
-    "42601" -> MinamotoException.SyntaxError(message, detail)
-    "42P01" -> MinamotoException.UndefinedTable(message)
-    "42703" -> MinamotoException.UndefinedColumn(message)
-    else    -> MinamotoException.QueryFailed(
+private fun ErrorResponse.asException(): DatabaseException = when (sqlState) {
+    "23505" -> DatabaseException.UniqueViolation(message, sqlState, detail, hint)
+    "23503" -> DatabaseException.ForeignKeyViolation(message, sqlState, detail, hint)
+    "23502" -> DatabaseException.NotNullViolation(message, sqlState, detail)
+    "23514" -> DatabaseException.CheckViolation(message, sqlState, detail)
+    "40001" -> DatabaseException.SerializationFailure(message)
+    "40P01" -> DatabaseException.ServerDeadlockDetected(message)
+    "57014" -> DatabaseException.QueryCancelled(message)
+    "42601" -> DatabaseException.SyntaxError(message, detail)
+    "42P01" -> DatabaseException.UndefinedTable(message)
+    "42703" -> DatabaseException.UndefinedColumn(message)
+    else    -> DatabaseException.QueryFailed(
         message  = message,
         sqlState = sqlState,
         severity = severity,

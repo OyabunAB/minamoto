@@ -16,6 +16,9 @@
 package se.oyabun.minamoto
 
 import kotlin.coroutines.CoroutineContext
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.None
+import se.oyabun.aelv.One
 
 /**
  * Carries the active pool in the coroutine context.
@@ -40,8 +43,10 @@ class PoolContext(val pool: ConnectionPool) : CoroutineContext.Element {
  */
 interface ConnectionPool {
     val poolId: PoolId
-    suspend fun acquire(): ConnectionAcquireResult
-    suspend fun release(id: ConnectionId)
+    fun acquire(): One<ConnectionAcquireResult>
+    fun release(id: ConnectionId): None<Unit>
+    fun <T : Any> transactionally(definition: TransactionDefinition, block: () -> One<T>): One<T>
+    fun <T : Any> transactionally(definition: TransactionDefinition, block: () -> Many<T>): Many<T>
 }
 
 /**

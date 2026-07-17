@@ -19,12 +19,29 @@ import io.netty.buffer.ByteBufAllocator
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import se.oyabun.aelv.Many
+import se.oyabun.aelv.One
+import se.oyabun.aelv.None
 import se.oyabun.aelv.ReplaySink
 import se.oyabun.aelv.await
+import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.discard
 import se.oyabun.aelv.drain
+import se.oyabun.aelv.firstMaybe
+import se.oyabun.aelv.flatMap
+import se.oyabun.aelv.flatMapNone
+import se.oyabun.aelv.fold
+import se.oyabun.aelv.getOrThrow
+import se.oyabun.aelv.map
+import se.oyabun.aelv.or
+import se.oyabun.aelv.recover
+import se.oyabun.aelv.then
+import se.oyabun.aelv.thenReturn
+import se.oyabun.aelv.then
+import se.oyabun.aelv.toMany
 import se.oyabun.aelv.netty.NettyConnection
 import se.oyabun.aelv.netty.NettyTransport
+import se.oyabun.aelv.netty.SslMode
+import se.oyabun.aelv.netty.TcpOptions
 import se.oyabun.aelv.netty.inbound
 import se.oyabun.aelv.netty.readRawByte
 import se.oyabun.aelv.netty.upgradeTls
@@ -32,9 +49,12 @@ import se.oyabun.aelv.netty.write
 import se.oyabun.aelv.publishOn
 import se.oyabun.aelv.rightOrThrow
 import se.oyabun.minamoto.Connection
+import se.oyabun.minamoto.ConnectionFactory
 import se.oyabun.minamoto.ConnectionId
 import se.oyabun.minamoto.ConnectionState
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.DatabaseException
+import se.oyabun.minamoto.SavepointId
+import se.oyabun.minamoto.TransactionDefinition
 import se.oyabun.minamoto.ValidationResult
 import se.oyabun.minamoto.postgres.codec.CodecRegistry
 import se.oyabun.minamoto.postgres.Parameter
@@ -142,15 +162,16 @@ internal class PostgresConnection(
         )
 
     /**
-     * Send [messages] to the server and stream responses until [takeUntil] returns true.
+     * Registers a conversation, sends [messages], and returns the response stream.
      *
-     * Writes and conversation registration are atomic under [writeMutex] — the conversation
-     * is in the queue before its messages hit the wire, preserving FIFO ordering.
+     * Cold — the mutex acquisition and wire writes happen at subscription time, not
+     * at call time. This means the pipeline can be defined without a coroutine context
+     * and the actual I/O deferred until the pipeline is subscribed.
      */
-    suspend fun exchange(
+    fun exchange(
         messages:  List<FrontendMessage>,
         takeUntil: (BackendMessage) -> Boolean,
-    ): Many<BackendMessage> {
+    ): Many<BackendMessage> = Many.defer(factory = suspend {
         val sink         = ReplaySink<BackendMessage>()
         val conversation = Conversation(takeUntil, sink)
 
@@ -163,70 +184,57 @@ internal class PostgresConnection(
             }
         }
 
-        return sink.asMany()
-    }
+        sink.asMany()
+    })
 
-    override suspend fun ping(): ValidationResult =
-        try {
-            exchange(
-                messages = listOf(
-                    Parse("", "SELECT 1"),
-                    Bind("", "", emptyList<Parameter>()),
-                    Execute("", 1),
-                    Sync,
-                ),
-                takeUntil = { it is ReadyForQuery },
-            ).discard().await()
-            ValidationResult.Valid
-        } catch (e: Exception) {
-            ValidationResult.Invalid(e.message ?: "ping failed")
+    override fun ping(): One<ValidationResult> =
+        exchange(
+            messages  = listOf(Parse("", "SELECT 1"), Bind("", "", emptyList<Parameter>()), Execute("", 1), Sync),
+            takeUntil = { it is ReadyForQuery },
+        ).fold(ValidationResult.Valid as ValidationResult) { acc, msg ->
+            if (msg is BackendMessage.ErrorResponse) ValidationResult.Invalid(msg.message) else acc
         }
 
-    override suspend fun close() {
-        log.connection.closing(id)
-        state = ConnectionState.Closing
-        subscription.cancel()
-        connection.write(MessageEncoder.encode(Terminate, allocator)).await()
-        connection.channel.close().sync()
-        log.connection.closed(id)
-        state = ConnectionState.Closed
-    }
+    override fun close(): None<Unit> =
+        None.defer<Unit> { log.connection.closing(id); state = ConnectionState.Closing; subscription.cancel() }
+            .then { connection.write(MessageEncoder.encode(Terminate, allocator)) }
+            .then { None.defer<Unit> { connection.channel.close().sync(); log.connection.closed(id); state = ConnectionState.Closed } }
 
-    override suspend fun begin(definition: se.oyabun.minamoto.TransactionDefinition) {
+    private fun executeSimple(sql: String): None<Unit> =
+        exchange(
+            messages  = listOf(Parse("", sql), Bind("", "", emptyList<Parameter>()), Execute("", 0), Sync),
+            takeUntil = { it is ReadyForQuery },
+        ).discard().then { None.complete<Unit>() }
+
+    override fun begin(definition: TransactionDefinition): None<Unit> =
         executeSimple(definition.toBeginSql())
-        state = ConnectionState.InTransaction
-    }
+            .then { None.defer<Unit> { state = ConnectionState.InTransaction } }
 
-    override suspend fun commit() {
+    override fun commit(): None<Unit> =
         executeSimple("COMMIT")
-        state = ConnectionState.Idle
-    }
+            .then { None.defer<Unit> { state = ConnectionState.Idle } }
 
-    override suspend fun rollback() {
+    override fun rollback(): None<Unit> =
         executeSimple("ROLLBACK")
-        state = ConnectionState.Idle
-    }
+            .then { None.defer<Unit> { state = ConnectionState.Idle } }
 
-    override suspend fun savepoint(id: se.oyabun.minamoto.SavepointId) =
-        executeSimple("SAVEPOINT ${id.value}")
+    override fun savepoint(id: SavepointId): None<Unit> = executeSimple("SAVEPOINT ${id.value}")
+    override fun releaseSavepoint(id: SavepointId): None<Unit> = executeSimple("RELEASE SAVEPOINT ${id.value}")
+    override fun rollbackToSavepoint(id: SavepointId): None<Unit> = executeSimple("ROLLBACK TO SAVEPOINT ${id.value}")
 
-    override suspend fun releaseSavepoint(id: se.oyabun.minamoto.SavepointId) =
-        executeSimple("RELEASE SAVEPOINT ${id.value}")
-
-    override suspend fun rollbackToSavepoint(id: se.oyabun.minamoto.SavepointId) =
-        executeSimple("ROLLBACK TO SAVEPOINT ${id.value}")
-
-    private suspend fun executeSimple(sql: String) {
+    internal fun queryBoolean(sql: String): One<Boolean> =
         exchange(
             messages = listOf(
                 Parse("", sql),
                 Bind("", "", emptyList<Parameter>()),
-                Execute("", 0),
+                Execute("", 1),
                 Sync,
             ),
             takeUntil = { it is ReadyForQuery },
-        ).discard().await()
-    }
+        ).fold(false) { _, msg ->
+            if (msg is BackendMessage.DataRow) msg.values.firstOrNull()?.firstOrNull() == 1.toByte()
+            else false
+        }
 
     /**
      * Sends a [CancelRequest] for any query currently executing on this connection.
@@ -235,19 +243,19 @@ internal class PostgresConnection(
      * This is a best-effort signal — the server may have already finished the query
      * by the time the request arrives.
      */
-    internal suspend fun cancel() {
-        val keyData = backendKeyData ?: return
-        val host    = connection.channel.remoteAddress().let { (it as? java.net.InetSocketAddress)?.hostString ?: return }
-        val port    = connection.channel.remoteAddress().let { (it as? java.net.InetSocketAddress)?.port ?: return }
-        try {
-            val cancelConnection = transport.connect(host, port).await().rightOrThrow()
-            cancelConnection.write(
-                MessageEncoder.encode(CancelRequest(keyData.processId, keyData.secretKey), allocator)
-            ).await()
-            cancelConnection.channel.close().sync()
-        } catch (_: Exception) {
-            log.connection.invalidState(id, "cancel request failed — server may have already completed the query")
-        }
+    internal fun cancel(): None<NettyConnection> {
+        val keyData = backendKeyData ?: return None.complete()
+        val address = connection.channel.remoteAddress() as? java.net.InetSocketAddress
+            ?: return None.complete()
+        return transport.connect(address.hostString, address.port)
+            .flatMapNone { cancelConnection ->
+                cancelConnection.write(MessageEncoder.encode(CancelRequest(keyData.processId, keyData.secretKey), allocator))
+                    .then { None.defer<Unit> { cancelConnection.channel.close().sync() } }
+            }
+            .recover { e ->
+                None.defer<NettyConnection> { log.connection.invalidState(id, "cancel request failed — server may have already completed the query") }
+            }
+            
     }
 }
 
@@ -257,68 +265,114 @@ internal data class Conversation(
 )
 
 data class ConnectionConfig(
-    val host:                              String,
-    val port:                              Int                                   = 5432,
-    val user:                              String,
-    val password:                          String,
-    val database:                          String                                = user,
-    val sslMode:                           se.oyabun.aelv.netty.SslMode         = se.oyabun.aelv.netty.SslMode.Prefer,
-    val applicationName:                   String                                = "minamoto",
+    /**
+     * Host list in priority order. The first reachable host matching [hostSelectionStrategy]
+     * is used. Single-host setups use a list of one.
+     */
+    val hosts:                           Hosts                                 = emptyList(),
+    /**
+     * Convenience single-host constructor fields — used when [hosts] is empty.
+     * Ignored if [hosts] is non-empty.
+     */
+    val host:                            String                                = "localhost",
+    val port:                            Int                                   = 5432,
+    val user:                            String,
+    /** Supplies the password for each new physical connection. Called once per [PostgresConnectionFactory.create]. */
+    val password:                        CredentialSupplier,
+    val database:                        String                                = user,
+    val sslMode:                         SslMode         = SslMode.Prefer,
+    val tcpOptions:                      TcpOptions      = TcpOptions(),
+    val applicationName:                 String                                = "minamoto",
+    val hostSelectionStrategy:           HostSelectionStrategy                 = HostSelectionStrategy.Any,
     /** Schema search order — sent as `search_path`. Empty means server default. */
-    val searchPath:                        List<String>                          = emptyList(),
+    val searchPath:                      List<String>                          = emptyList(),
     /** Session timezone — sent as `timezone`. Null means server default. */
-    val timezone:                          String?                               = null,
+    val timezone:                        String?                               = null,
     /** Aborts any statement taking longer than this — sent as `statement_timeout` in milliseconds. */
-    val statementTimeout:                  kotlin.time.Duration?                 = null,
+    val statementTimeout:                kotlin.time.Duration?                 = null,
     /** Aborts waiting for a lock after this duration — sent as `lock_timeout` in milliseconds. */
-    val lockTimeout:                       kotlin.time.Duration?                 = null,
+    val lockTimeout:                     kotlin.time.Duration?                 = null,
     /** Terminates sessions idle inside a transaction after this duration — sent as `idle_in_transaction_session_timeout`. */
-    val idleInTransactionSessionTimeout:   kotlin.time.Duration?                 = null,
+    val idleInTransactionSessionTimeout: kotlin.time.Duration?                 = null,
+    /** Unix domain socket path. When set, [host] and [port] are ignored and connection goes via the socket. */
+    val unixSocketPath:                  String?                               = null,
     /** Controls the PGwire `Execute.maxRows` per round-trip. 50 means 50 rows per Execute → PortalSuspended → next Execute cycle. Increase for large result sets to reduce round-trips. */
-    val defaultFetchSize:                  Int                                   = 50,
-)
+    val defaultFetchSize:                Int                                   = 50,
+) {
+    /** Resolved host list — [hosts] if non-empty, otherwise the single [host]/[port] pair. */
+    fun resolvedHosts(): List<Host> =
+        hosts.ifEmpty { listOf(Host(host, port)) }
+}
 
 class PostgresConnectionFactory(
     private val config:   ConnectionConfig,
-    private val registry: se.oyabun.minamoto.postgres.codec.CodecRegistry = se.oyabun.minamoto.postgres.codec.CodecRegistry(),
-) : se.oyabun.minamoto.ConnectionFactory {
+    private val registry: CodecRegistry = CodecRegistry(),
+) : ConnectionFactory {
 
     private val transport = NettyTransport()
     private val idCounter = java.util.concurrent.atomic.AtomicLong(0)
 
-    override suspend fun create(): se.oyabun.minamoto.Connection {
-        val nettyConnection = transport.connect(config.host, config.port)
-            .await()
-            .rightOrThrow()
+    override fun create(): One<Connection> =
+        Many.from(config.resolvedHosts())
+            .concatMap { host -> tryCreate(host).toMany().recover { Many.empty() } }
+            .firstMaybe()
+            .or { throw DatabaseException.ConnectionLost(
+                "all hosts exhausted — tried: ${config.resolvedHosts().joinToString { "${it.hostname}:${it.port}" }}"
+            ) }
 
-        // TLS negotiation happens at the raw channel level before PostgresConnection
-        // wraps the channel — before any framing or subscription is active.
-        negotiateSsl(nettyConnection, config.host, config.sslMode)
+    private fun tryCreate(host: Host): One<Connection> =
+        (if (config.unixSocketPath != null)
+            transport.connectUnix(config.unixSocketPath!!, config.tcpOptions)
+        else
+            transport.connect(host.hostname, host.port, config.tcpOptions))
+        .flatMap { nettyConnection ->
+            negotiateSsl(nettyConnection, host.hostname, config.sslMode)
+                .thenReturn(nettyConnection)
+        }
+        .flatMap { nettyConnection ->
+            val connection = PostgresConnection(
+                id         = ConnectionId(idCounter.incrementAndGet()),
+                connection = nettyConnection,
+                transport  = transport,
+                registry   = registry,
+            )
+            connection.handshake(
+                user                            = config.user,
+                password                        = config.password(),
+                database                        = config.database,
+                applicationName                 = config.applicationName,
+                searchPath                      = config.searchPath,
+                timezone                        = config.timezone,
+                statementTimeout                = config.statementTimeout,
+                lockTimeout                     = config.lockTimeout,
+                idleInTransactionSessionTimeout = config.idleInTransactionSessionTimeout,
+            ).map { keyData -> connection.backendKeyData = keyData; connection }
+        }
+        .flatMap { connection ->
+            checkHostRole(connection, host).thenReturn(connection as Connection)
+        }
 
-        val connection = PostgresConnection(
-            id         = ConnectionId(idCounter.incrementAndGet()),
-            connection = nettyConnection,
-            transport  = transport,
-            registry   = registry,
-        )
-        connection.backendKeyData = connection.handshake(
-            user                            = config.user,
-            password                        = config.password,
-            database                        = config.database,
-            applicationName                 = config.applicationName,
-            searchPath                      = config.searchPath,
-            timezone                        = config.timezone,
-            statementTimeout                = config.statementTimeout,
-            lockTimeout                     = config.lockTimeout,
-            idleInTransactionSessionTimeout = config.idleInTransactionSessionTimeout,
-        )
-        return connection
-    }
+    private fun checkHostRole(connection: PostgresConnection, host: Host): None<Boolean> =
+        when (config.hostSelectionStrategy) {
+            HostSelectionStrategy.Any -> None.complete()
+            HostSelectionStrategy.Primary ->
+                connection.queryBoolean("SELECT NOT pg_is_in_recovery()")
+                    .flatMapNone { isPrimary ->
+                        if (!isPrimary) None.error<Boolean>(DatabaseException.InvalidState("${host.hostname}:${host.port} is not a primary"))
+                        else None.complete<Boolean>()
+                    }
+            HostSelectionStrategy.Secondary ->
+                connection.queryBoolean("SELECT pg_is_in_recovery()")
+                    .flatMapNone { isSecondary ->
+                        if (!isSecondary) None.error<Boolean>(DatabaseException.InvalidState("${host.hostname}:${host.port} is not a secondary"))
+                        else None.complete<Boolean>()
+                    }
+        }
 
-    override suspend fun validate(connection: se.oyabun.minamoto.Connection): ValidationResult =
+    override fun validate(connection: Connection): One<ValidationResult> =
         connection.ping()
 
-    override suspend fun destroy(connection: se.oyabun.minamoto.Connection) =
+    override fun destroy(connection: Connection): None<Unit> =
         connection.close()
 }
 
@@ -330,29 +384,21 @@ class PostgresConnectionFactory(
  * because [PostgresConnection] subscribes to [inbound][NettyConnection] on construction
  * and would consume the 'S'/'N' byte before [readRawByte] can intercept it.
  */
-private suspend fun negotiateSsl(
-    connection: NettyConnection,
-    host:       String,
-    sslMode:    se.oyabun.aelv.netty.SslMode,
-) {
-    if (sslMode is se.oyabun.aelv.netty.SslMode.Disable) return
-
-    // SSLRequest: 4-byte length (8) + 4-byte magic (80877103)
+private fun negotiateSsl(connection: NettyConnection, host: String, sslMode: SslMode): None<Byte> {
+    if (sslMode is SslMode.Disable) return None.complete()
     val allocator = connection.channel.alloc()
-    val buf = allocator.buffer(8)
-    buf.writeInt(8)
-    buf.writeInt(80877103)
-    connection.write(buf).await()
-
-    val response = connection.readRawByte()
-
-    when {
-        response == 'S'.code.toByte() ->
-            connection.upgradeTls(sslMode, host)
-        response == 'N'.code.toByte() && sslMode is se.oyabun.aelv.netty.SslMode.Prefer ->
-            Unit // fall back to plain
-        else -> throw MinamotoException.TlsFailed(
-            "server declined TLS (response: '${response.toInt().toChar()}') but mode $sslMode requires it"
-        )
-    }
+    val buf = allocator.buffer(8).also { it.writeInt(8); it.writeInt(80877103) }
+    return connection.write(buf)
+        .then { One.defer { connection.readRawByte() } }
+        .flatMapNone { response ->
+            when {
+                response == 'S'.code.toByte() ->
+                    None.defer<Byte> { connection.upgradeTls(sslMode, host) }
+                response == 'N'.code.toByte() && sslMode is SslMode.Prefer ->
+                    None.complete<Byte>()
+                else -> None.error<Byte>(DatabaseException.TlsFailed(
+                    "server declined TLS (response: '${response.toInt().toChar()}') but mode $sslMode requires it"
+                ))
+            }
+        }
 }

@@ -16,7 +16,7 @@
 package se.oyabun.minamoto.postgres.protocol
 
 import io.netty.buffer.ByteBuf
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.postgres.Column
 import se.oyabun.minamoto.postgres.protocol.Authentication
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.KeyData
@@ -66,7 +66,7 @@ internal object MessageDecoder {
             'E'  -> decodeErrorOrNotice(buffer, notice = false)
             'N'  -> decodeErrorOrNotice(buffer, notice = true)
             'A'  -> decodeNotification(buffer)
-            else -> throw MinamotoException.InvalidState("unknown backend message type: '$type'")
+            else -> throw DatabaseException.InvalidState("unknown backend message type: '$type'")
         }
     }
 
@@ -93,14 +93,14 @@ internal object MessageDecoder {
             buffer.readBytes(data)
             Authentication.SASLFinal(data)
         }
-        else -> throw MinamotoException.InvalidState("unsupported authentication type: $subtype")
+        else -> throw DatabaseException.InvalidState("unsupported authentication type: $subtype")
     }
 
     private fun decodeTransactionStatus(char: Char): TransactionStatus = when (char) {
         'I'  -> TransactionStatus.Idle
         'T'  -> TransactionStatus.InTransaction
         'E'  -> TransactionStatus.FailedTransaction
-        else -> throw MinamotoException.InvalidState("unknown transaction status: '$char'")
+        else -> throw DatabaseException.InvalidState("unknown transaction status: '$char'")
     }
 
     private fun decodeRowDescription(buffer: ByteBuf): RowDescription {

@@ -22,10 +22,10 @@ class ExtendedTypeIntegrationTest {
 
     companion object {
         val postgresImages = listOf(
-            "postgres:13-alpine@sha256:fb9065b6e3e213bdc07edd372a5b2a26245840b7fb65d1fd8b6700106d51805c",
-            "postgres:15-alpine@sha256:fceb6f86328c36f2438fae3b851b0cc57c4a7e69a58c866d9ce24281f2cf0c9c",
-            "postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609",
-            "postgres:18beta2-alpine@sha256:0164ef2cdce5fc6136d7de2cf9864bee88f593283608facace1e6460ba63ad0c",
+            "postgres:13-alpine",
+            "postgres:15-alpine",
+            "postgres:17-alpine",
+            "postgres:18beta2-alpine",
         )
     }
 

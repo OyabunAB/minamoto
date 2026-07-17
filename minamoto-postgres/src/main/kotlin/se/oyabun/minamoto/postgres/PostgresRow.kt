@@ -17,7 +17,7 @@ package se.oyabun.minamoto.postgres
 
 import se.oyabun.minamoto.ColumnMetadata
 import se.oyabun.minamoto.ColumnType
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.Nullability
 import se.oyabun.minamoto.Row
 import se.oyabun.minamoto.RowMetadata
@@ -65,7 +65,7 @@ internal data class Column(
 /**
  * [Row] implementation backed by [Column]s from the wire and a [CodecRegistry].
  *
- * Column lookup is by name, case-insensitive. [get] throws [MinamotoException.UnexpectedNull]
+ * Column lookup is by name, case-insensitive. [get] throws [DatabaseException.UnexpectedNull]
  * when the value is [Column.Value.Missing]. [getOrNull] returns null in that case.
  *
  * Codec dispatch uses the column's OID from [Column.Description].
@@ -91,7 +91,7 @@ internal class PostgresRow(
     override fun <T : Any> get(column: String, type: KClass<T>): T {
         val found = find(column)
         return when (found.value) {
-            is Column.Value.Missing -> throw MinamotoException.UnexpectedNull(column)
+            is Column.Value.Missing -> throw DatabaseException.UnexpectedNull(column)
             is Column.Value.Present -> registry.find(found.description.typeOid, type)
                                                .decode(found.value.bytes, found.description.typeOid)
         }
@@ -108,7 +108,7 @@ internal class PostgresRow(
 
     private fun find(name: String): Column =
         columns.firstOrNull { it.description.name.equals(name, ignoreCase = true) }
-            ?: throw MinamotoException.UnknownColumn(name)
+            ?: throw DatabaseException.UnknownColumn(name)
 }
 
 /** Reified extension — captures [T] at the call site and dispatches to [Row.get]. */

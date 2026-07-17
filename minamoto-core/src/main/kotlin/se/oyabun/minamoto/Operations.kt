@@ -24,11 +24,11 @@ import kotlin.reflect.KClass
 /**
  * A single result row from a query.
  *
- * Use [get] when you expect a non-null value — it throws [MinamotoException.UnexpectedNull]
+ * Use [get] when you expect a non-null value — it throws [DatabaseException.UnexpectedNull]
  * if the column value is null. Use [getOrNull] when nulls are legitimate.
  *
  * Type conversion is handled by the driver's codec registry. Requesting an unsupported
- * type throws [MinamotoException.CodecFailed].
+ * type throws [DatabaseException.CodecFailed].
  */
 interface Row {
     fun <T : Any> get(column: String, type: KClass<T>): T
@@ -75,12 +75,12 @@ sealed interface ColumnType {
 /**
  * Metadata for all columns in a result set.
  *
- * [column] looks up by name and throws [MinamotoException.UnknownColumn] if not found.
+ * [column] looks up by name and throws [DatabaseException.UnknownColumn] if not found.
  * For positional access use [columns] directly.
  */
 data class RowMetadata(val columns: List<ColumnMetadata>) {
     fun column(name: String): ColumnMetadata =
-        columns.firstOrNull { it.name == name } ?: throw MinamotoException.UnknownColumn(name)
+        columns.firstOrNull { it.name == name } ?: throw DatabaseException.UnknownColumn(name)
 }
 
 /** A named parameter binding — name to value. Use Kotlin's `to` infix: `"id" to 42`. */
@@ -115,11 +115,11 @@ interface BoundQuery {
 /**
  * A command (INSERT / UPDATE / DELETE / DDL) ready to have parameters bound.
  *
- * Call [bind] with named parameter bindings to produce a [BoundCommand], or call
+ * Call [bind] with named parameter bindings to produce a [BoundModify], or call
  * [execute] directly when the command has no parameters.
  */
-interface CommandBuilder {
-    fun bind(vararg bindings: Binding): BoundCommand
+interface ModifyBuilder {
+    fun bind(vararg bindings: Binding): BoundModify
     fun count(): One<Long> = bind().count()
 }
 
@@ -128,7 +128,7 @@ interface CommandBuilder {
  *
  * Returns the number of rows affected. DDL returns 0.
  */
-interface BoundCommand {
+interface BoundModify {
     fun count(): One<Long>
 }
 
@@ -136,16 +136,16 @@ interface BoundCommand {
  * A fire-and-forget statement ready to have parameters bound.
  *
  * Use for DDL, NOTIFY, SET, and any statement where the result is irrelevant.
- * Call [bind] with named parameter bindings to produce a [BoundEffect], or call
+ * Call [bind] with named parameter bindings to produce a [BoundRun], or call
  * [execute] directly when the statement has no parameters.
  */
-interface EffectBuilder {
-    fun bind(vararg bindings: Binding): BoundEffect
+interface RunBuilder {
+    fun bind(vararg bindings: Binding): BoundRun
     fun execute(): None<Unit> = bind().execute()
 }
 
 /** A fire-and-forget statement with parameters encoded, ready to execute. */
-interface BoundEffect {
+interface BoundRun {
     fun execute(): None<Unit>
 }
 
@@ -161,6 +161,6 @@ interface BoundEffect {
  */
 interface Database {
     fun query(statement: String):   QueryBuilder
-    fun command(statement: String): CommandBuilder
-    fun effect(statement: String):  EffectBuilder
+    fun modify(statement: String): ModifyBuilder
+    fun run(statement: String):  RunBuilder
 }

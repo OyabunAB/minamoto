@@ -20,7 +20,7 @@ import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.LocalTime
 import kotlinx.serialization.Serializable
-import se.oyabun.minamoto.MinamotoException
+import se.oyabun.minamoto.DatabaseException
 import java.math.BigDecimal
 import java.time.OffsetTime
 import java.time.ZoneOffset
@@ -260,7 +260,7 @@ class CodecTest {
 
     @Test fun `registering non-serializable type for json throws CodecFailed`() {
         val registry = CodecRegistry()
-        assertFailsWith<MinamotoException.CodecFailed> {
+        assertFailsWith<DatabaseException.CodecFailed> {
             registry.registerJson<Thread>()
         }
     }
@@ -298,14 +298,14 @@ class CodecTest {
 
     @Test fun `registry throws CodecFailed for unknown OID and type`() {
         val registry = CodecRegistry()
-        assertFailsWith<MinamotoException.CodecFailed> {
+        assertFailsWith<DatabaseException.CodecFailed> {
             registry.find(99999, String::class)
         }
     }
 
     @Test fun `registry throws CodecFailed for known OID but incompatible type`() {
         val registry = CodecRegistry()
-        assertFailsWith<MinamotoException.CodecFailed> {
+        assertFailsWith<DatabaseException.CodecFailed> {
             registry.find(Oid.BOOL, Int::class)
         }
     }

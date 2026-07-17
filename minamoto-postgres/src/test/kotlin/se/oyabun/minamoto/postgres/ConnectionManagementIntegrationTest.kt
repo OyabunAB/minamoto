@@ -6,15 +6,24 @@ import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
+import se.oyabun.aelv.Many
 import se.oyabun.aelv.Verify
+import se.oyabun.aelv.delaySubscription
+import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.map
+import se.oyabun.aelv.merge
+import se.oyabun.aelv.then
 import se.oyabun.aelv.toMany
+import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
+import se.oyabun.minamoto.Row
 import se.oyabun.minamoto.pool.MinamotoPool
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 class ConnectionManagementIntegrationTest {
@@ -152,7 +161,26 @@ class ConnectionManagementIntegrationTest {
                 org.junit.jupiter.api.Assumptions.assumeTrue(false, "Phase 6 — multi-host not yet implemented")
             },
             dynamicTest("cancelling a long-running query sends CancelRequest and unblocks") {
-                org.junit.jupiter.api.Assumptions.assumeTrue(false, "Phase 5 — CancelRequest not yet implemented")
+                val database = PostgresDatabase(ConnectionConfig(
+                    host     = postgres.host,
+                    port     = postgres.firstMappedPort,
+                    user     = postgres.username,
+                    password = { postgres.password },
+                    database = postgres.databaseName,
+                ))
+                val p = database.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 1,
+                    acquireTimeout = 5.seconds, createTimeout = 10.seconds, validation = ValidationQuery.None))
+                val slowQuery        = database.query("SELECT pg_sleep(10)").single().toMany()
+                val cancelAfterDelay = Many.items(Unit)
+                    .delaySubscription(300.milliseconds)
+                    .flatMapNone { p.acquiredConnections().first().cancel() }
+                    .then { Many.empty<Row>() }
+                Verify.that(
+                    merge(slowQuery, cancelAfterDelay), context = PoolContext(p),
+                ).completesWithError(within = 5.seconds).also { error ->
+                    assertIs<DatabaseException.QueryCancelled>(error)
+                }
+                Verify.that(p.close()).completesNormally()
             },
 
             dynamicTest("stop container") { postgres.stop() },

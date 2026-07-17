@@ -213,6 +213,9 @@ interface ManagedPool : ConnectionPool {
     /** Returns the [Connection] for [id] if it is currently acquired by this pool, or null if not found. */
     fun connectionFor(id: ConnectionId): Connection?
 
+    /** Returns all connections currently in the acquired state. */
+    fun acquiredConnections(): List<Connection>
+
     override fun release(id: ConnectionId): None<Unit>
 
     /**

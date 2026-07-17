@@ -26,7 +26,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import se.oyabun.aelv.Sinks
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
+import se.oyabun.aelv.Signal
 import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.discard
@@ -69,6 +71,7 @@ import se.oyabun.minamoto.TransactionId
 import se.oyabun.minamoto.ValidationResult
 import se.oyabun.minamoto.ConnectionAcquireResult
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -80,7 +83,8 @@ class MinamotoPool(
 
     override val poolId: PoolId = PoolId(poolIdCounter.incrementAndGet())
 
-    private val idle       = Sinks.unicast<PoolSlot>()
+    private val idleQueue  = ConcurrentLinkedQueue<PoolSlot>()
+    private val idleSignal = Channel<Unit>(Channel.CONFLATED)
     private val slots      = ConcurrentHashMap<ConnectionId, PoolSlot>()
     private val total      = AtomicInteger(0)
     private val waiting    = AtomicInteger(0)
@@ -122,7 +126,8 @@ class MinamotoPool(
                         total.incrementAndGet()
                         val slot = PoolSlot(connection, SlotState.Idle, System.nanoTime(), System.nanoTime())
                         slots[slot.id] = slot
-                        idle.emit(slot)
+                        idleQueue.add(slot)
+                        idleSignal.trySend(Unit)
                     }
                 }
             }
@@ -159,7 +164,19 @@ class MinamotoPool(
 
                 None.defer<Unit> { waiting.incrementAndGet() }
                     .then { maybeCreateSlot() }
-                    .then { idle.asOne() }
+                    .then {
+                        One.generate<PoolSlot> { downstream ->
+                            val deadline = System.nanoTime() + config.acquireTimeout.inWholeNanoseconds
+                            while (true) {
+                                val slot = idleQueue.poll()
+                                if (slot != null) { downstream(Signal.Upstream.Next(slot)); break }
+                                val remaining = (deadline - System.nanoTime()).coerceAtLeast(0)
+                                if (remaining == 0L) { downstream(Signal.Upstream.Error(TimeoutException(config.acquireTimeout))); break }
+                                withTimeoutOrNull(remaining / 1_000_000) { idleSignal.receive() }
+                            }
+                            downstream(Signal.Upstream.Complete)
+                        }
+                    }
                     .doFinally { waiting.decrementAndGet() }
                     .map { slot: PoolSlot -> slot.copy(state = SlotState.Acquired, lastUsed = System.nanoTime()).also { slots[it.id] = it } }
                     .flatMap { slot -> validateAndHook(slot) }
@@ -203,7 +220,8 @@ class MinamotoPool(
                 invalidate(id)
             else None.defer<Unit> {
                 slots[id] = slot.copy(state = SlotState.Idle, lastUsed = now)
-                idle.emit(slots[id]!!)
+                idleQueue.add(slots[id]!!)
+                idleSignal.trySend(Unit)
                 if (config.eviction is EvictionPolicy.OnRelease) evict()
             }.then { maybeCreateSlot() }
         }
@@ -227,7 +245,7 @@ class MinamotoPool(
             .then {
                 None.defer<Unit> {
                     scope.cancel()
-                    idle.complete()
+                    idleSignal.close()
                     slots.clear()
                     total.set(0)
                 }
@@ -373,6 +391,7 @@ class MinamotoPool(
     }
 
     override fun connectionFor(id: ConnectionId): Connection? = slots[id]?.connection
+    override fun acquiredConnections(): List<Connection> = slots.values.filter { it.state is SlotState.Acquired }.map { it.connection }
 
     override fun acquire(): One<ConnectionAcquireResult> =
         acquireSlot().map { result ->

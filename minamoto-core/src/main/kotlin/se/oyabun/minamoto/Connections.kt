@@ -183,6 +183,19 @@ interface Connection {
 
     /** Send `ROLLBACK TO SAVEPOINT [id]`. */
     fun rollbackToSavepoint(id: SavepointId): None<Unit>
+
+    /**
+     * Sends a `CancelRequest` for any query currently executing on this connection.
+     *
+     * Opens a fresh TCP connection to the server, sends the cancel packet, and closes it.
+     * This is a best-effort signal — the server may have already completed the query
+     * by the time the request arrives. A cancelled query surfaces as
+     * [se.oyabun.minamoto.DatabaseException.QueryCancelled] on the executing pipeline.
+     *
+     * Returns [None.complete] if no backend key data is available (e.g. the connection
+     * has not yet completed its handshake).
+     */
+    fun cancel(): None<Unit> = None.complete()
 }
 
 /**

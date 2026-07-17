@@ -243,7 +243,7 @@ internal class PostgresConnection(
      * This is a best-effort signal — the server may have already finished the query
      * by the time the request arrives.
      */
-    internal fun cancel(): None<NettyConnection> {
+    override fun cancel(): None<Unit> {
         val keyData = backendKeyData ?: return None.complete()
         val address = connection.channel.remoteAddress() as? java.net.InetSocketAddress
             ?: return None.complete()
@@ -252,10 +252,10 @@ internal class PostgresConnection(
                 cancelConnection.write(MessageEncoder.encode(CancelRequest(keyData.processId, keyData.secretKey), allocator))
                     .then { None.defer<Unit> { cancelConnection.channel.close().sync() } }
             }
-            .recover { e ->
-                None.defer<NettyConnection> { log.connection.invalidState(id, "cancel request failed — server may have already completed the query") }
+            .recover {
+                None.defer { log.connection.invalidState(id, "cancel request failed — server may have already completed the query") }
             }
-            
+            .then { None.complete<Unit>() }
     }
 }
 

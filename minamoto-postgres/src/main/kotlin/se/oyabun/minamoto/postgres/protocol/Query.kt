@@ -18,10 +18,14 @@ package se.oyabun.minamoto.postgres.protocol
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
+import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.discard
+import se.oyabun.aelv.doOnComplete
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.fold
+import se.oyabun.aelv.resource
+import se.oyabun.aelv.then
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.Row
 import se.oyabun.minamoto.postgres.Column
@@ -37,28 +41,33 @@ import se.oyabun.minamoto.postgres.protocol.BackendMessage.PortalSuspended
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.ReadyForQuery
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.RowDescription
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Bind
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Close
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Describe
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Execute
+import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Flush
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Parse
 import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Sync
 
 /**
  * Executes a query using the PGwire extended query protocol, streaming typed [Row]s.
  *
+ * Uses `Execute(fetchSize) + Flush` for true backpressure streaming — the server only
+ * sends [fetchSize] rows at a time and the connection stays busy until the stream is
+ * exhausted or cancelled. `Sync` is sent only when the portal closes, releasing the
+ * connection back to the pool.
+ *
  * When [PostgresConnection.statementCache] is enabled and [statement] has been executed
  * before, the `Parse` + `Describe` round-trip is skipped and the cached statement name
- * and column descriptions are reused directly. On first execution the statement is
- * parsed under a generated name and cached.
- *
- * Backpressure propagates via [Execute.maxRows]. [PortalSuspended] triggers subsequent
- * [Execute] messages until all rows are delivered.
+ * and column descriptions are reused directly.
  */
 internal fun PostgresConnection.executeQuery(
     statement:  String,
     parameters: Parameters = emptyList(),
     fetchSize:  Int        = 50,
 ): Many<Row> {
-    val portalName = ""
+    val portalName   = nextPortalName()
+    var portalClosed = false
+
     return parseAndDescribe(statement)
         .fold(emptyList<Column.Description>()) { acc, col -> acc + col }
         .flatMapMany(transform = suspend { descriptions: List<Column.Description> ->
@@ -70,28 +79,37 @@ internal fun PostgresConnection.executeQuery(
                     else descriptions.map { col -> registry.preferredFormat(col.typeOid).wire }
                 }
 
-            exchange(
-                messages  = listOf(
-                    Bind(portalName, statementName, parameters, resultFormats = resultFormats),
-                    Execute(portalName, fetchSize),
-                    Sync,
-                ),
-                takeUntil = { it is ReadyForQuery },
-            ).concatMap { message ->
-                when (message) {
-                    is DataRow         -> Many.items(buildRow(message, descriptions))
-                    is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions, parameters)
-                    is ErrorResponse   -> {
-                        if (message.sqlState == INVALID_PREPARED_STATEMENT) {
-                            statementCache.evict(statement)
-                            executeQuery(statement, parameters, fetchSize)
-                        } else {
-                            Many.error(message.asException())
+            fun closingSync(): None<Unit> = syncPortal(portalName).doOnComplete { portalClosed = true }
+
+            Many.resource<Unit, Row>(
+                acquire = { One.single(Unit) },
+                release = { _, _ -> if (!portalClosed) syncPortal(portalName) else None.complete<Unit>() },
+                use     = { _ ->
+                    exchange(
+                        messages  = listOf(
+                            Bind(portalName, statementName, parameters, resultFormats = resultFormats),
+                            Execute(portalName, fetchSize),
+                            Flush,
+                        ),
+                        takeUntil = { it is PortalSuspended || it is CommandComplete || it is ErrorResponse },
+                    ).concatMap<BackendMessage, Row> { message ->
+                        when (message) {
+                            is DataRow         -> Many.items(buildRow(message, descriptions))
+                            is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions, ::closingSync)
+                            is CommandComplete -> closingSync().then { Many.empty<Row>() }
+                            is ErrorResponse   -> {
+                                if (message.sqlState == INVALID_PREPARED_STATEMENT) {
+                                    statementCache.evict(statement)
+                                    closingSync().then { executeQuery(statement, parameters, fetchSize) }
+                                } else {
+                                    closingSync().then { Many.error<Row>(message.asException()) }
+                                }
+                            }
+                            else               -> Many.empty()
                         }
                     }
-                    else               -> Many.empty()
-                }
-            }
+                },
+            )
         })
 }
 
@@ -180,20 +198,30 @@ private fun PostgresConnection.fetchMore(
     portalName:   String,
     fetchSize:    Int,
     descriptions: List<Column.Description>,
-    parameters:   Parameters,
+    closingSync:  () -> None<Unit>,
 ): Many<Row> = Many.defer(factory = suspend {
     exchange(
-        messages  = listOf(Execute(portalName, fetchSize), Sync),
-        takeUntil = { it is ReadyForQuery || it is PortalSuspended },
+        messages  = listOf(Execute(portalName, fetchSize), Flush),
+        takeUntil = { it is PortalSuspended || it is CommandComplete || it is ErrorResponse },
     )
-}).concatMap { message ->
+}).concatMap<BackendMessage, Row> { message ->
     when (message) {
         is DataRow         -> Many.items(buildRow(message, descriptions))
-        is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions, parameters)
-        is ErrorResponse   -> Many.error(message.asException())
+        is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions, closingSync)
+        is CommandComplete -> closingSync().then { Many.empty<Row>() }
+        is ErrorResponse   -> closingSync().then { Many.error<Row>(message.asException()) }
         else               -> Many.empty()
     }
 }
+
+/** Sends `Close(Portal) + Sync` to close the named portal and return the connection to idle. */
+private fun PostgresConnection.syncPortal(portalName: String): None<Unit> =
+    None.defer {
+        exchange(
+            messages  = listOf(Close(DescribeTarget.Portal, portalName), Sync),
+            takeUntil = { it is ReadyForQuery },
+        ).fold(Unit) { _, _ -> }.await()
+    }
 
 private fun PostgresConnection.buildRow(
     dataRow:      DataRow,

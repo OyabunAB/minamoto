@@ -108,7 +108,11 @@ internal class PostgresConnection(
     /** Backend key data received during handshake — used to send [CancelRequest] on a separate connection. */
     internal var backendKeyData: KeyData? = null
 
+    /** Allocates the next unique portal name for a streaming query on this connection. */
+    internal fun nextPortalName(): String = "p_${portalCounter.incrementAndGet()}"
+
     internal val writeMutex    = Mutex()
+    private  val portalCounter = java.util.concurrent.atomic.AtomicLong(0)
     private val conversations = ConcurrentLinkedQueue<Conversation>()
 
     private val subscription = connection.inbound()

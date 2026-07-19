@@ -86,6 +86,9 @@ internal sealed interface FrontendMessage {
         val maxRows:    Int = 0,
     ) : FrontendMessage
 
+    /** Flushes the output buffer without closing the current portal, keeping the connection busy. */
+    data object Flush : FrontendMessage
+
     /** Flushes the output buffer and waits for the server to respond. */
     data object Sync : FrontendMessage
 

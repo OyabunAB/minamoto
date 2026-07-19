@@ -83,6 +83,7 @@ internal object MessageEncoder {
             writeCString(message.name)
         }
         is Sync                -> encodeSingleMessage('S', allocator) {}
+        is FrontendMessage.Flush -> encodeSingleMessage('H', allocator) {}
         is Terminate           -> encodeSingleMessage('X', allocator) {}
         is CancelRequest       -> encodeCancelRequest(message, allocator)
         is SSLRequest          -> encodeSSLRequest(allocator)

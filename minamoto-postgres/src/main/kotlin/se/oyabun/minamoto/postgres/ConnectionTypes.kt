@@ -15,14 +15,17 @@
  */
 package se.oyabun.minamoto.postgres
 
+/** A database credential — a password or authentication token. */
+typealias Credential = String
+
 /**
- * Supplies a password (or token) for each new connection.
+ * Supplies a credential for each new connection.
  *
  * Called once per physical connection at creation time. Use this instead of a static
- * password string when credentials rotate — e.g. AWS IAM authentication tokens,
+ * credential string when credentials rotate — e.g. AWS IAM authentication tokens,
  * GCP service account tokens, or Vault-issued credentials.
  */
-typealias CredentialSupplier = () -> String
+typealias CredentialSupplier = () -> Credential
 
 /**
  * A single host in a [Hosts] list.

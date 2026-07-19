@@ -231,9 +231,11 @@ internal class PostgresConnection(
                 Sync,
             ),
             takeUntil = { it is ReadyForQuery },
-        ).fold(false) { _, msg ->
-            if (msg is BackendMessage.DataRow) msg.values.firstOrNull()?.firstOrNull() == 1.toByte()
-            else false
+        ).fold(false) { acc, msg ->
+            if (msg is BackendMessage.DataRow) {
+                val value = msg.values.firstOrNull()?.firstOrNull()
+                value == 1.toByte() || value == 't'.code.toByte()
+            } else acc
         }
 
     /**

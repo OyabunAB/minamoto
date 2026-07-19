@@ -133,6 +133,9 @@ sealed class DatabaseException(message: String, cause: Throwable? = null) : Runt
     /** Undefined column — SQLSTATE 42703. */
     class UndefinedColumn(message: String) : DatabaseException(message)
 
+    /** Permission denied — SQLSTATE 42501. */
+    class PermissionDenied(message: String) : DatabaseException(message)
+
     /** A transaction could not be committed. */
     class CommitFailed(message: String, cause: Throwable? = null) :
         DatabaseException(message, cause)

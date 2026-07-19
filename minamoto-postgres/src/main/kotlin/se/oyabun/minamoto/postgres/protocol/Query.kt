@@ -182,6 +182,7 @@ private fun ErrorResponse.asException(): DatabaseException = when (sqlState) {
     "42601" -> DatabaseException.SyntaxError(message, detail)
     "42P01" -> DatabaseException.UndefinedTable(message)
     "42703" -> DatabaseException.UndefinedColumn(message)
+    "42501" -> DatabaseException.PermissionDenied(message)
     else    -> DatabaseException.QueryFailed(
         message  = message,
         sqlState = sqlState,

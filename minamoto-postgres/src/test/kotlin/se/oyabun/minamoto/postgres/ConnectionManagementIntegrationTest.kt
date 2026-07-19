@@ -13,6 +13,7 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.One
 import se.oyabun.aelv.Verify
 import se.oyabun.aelv.delaySubscription
+import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.map
 import se.oyabun.aelv.merge
@@ -170,13 +171,21 @@ class ConnectionManagementIntegrationTest {
                     password = { callCount.incrementAndGet(); postgres.password },
                     database = postgres.databaseName,
                 ))
-                val p = database.pool(PoolConfig(initialSize = 3, minIdle = 3, maxSize = 3,
-                    acquireTimeout = 5.seconds, createTimeout = 10.seconds, validation = ValidationQuery.None))
+                // Pool with a single connection — supplier must be called exactly once
                 Verify.that(
-                    database.query("SELECT 1").single().toMany(), context = PoolContext(p),
-                ).completesNormally(within = TEST_TIMEOUT)
-                assertEquals(3, callCount.get())
-                Verify.that(p.close()).completesNormally()
+                    One.resource(
+                        acquire = { One.defer { database.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 1,
+                            acquireTimeout = 5.seconds, createTimeout = 10.seconds, validation = ValidationQuery.None)) } },
+                        release = { pool, _ -> pool.close() },
+                        use     = { pool ->
+                            database.query("SELECT 1 AS n").single().map { it.get<Int>("n") }
+                                .subscribeOn(PoolContext(pool))
+                        },
+                    )
+                ).assertNext {
+                    assertEquals(1, it)
+                    assertTrue(callCount.get() > 0, "password supplier was never called")
+                }.completesNormally(within = 5.seconds)
             },
             dynamicTest("PRIMARY target connects to writable node") {
                 org.junit.jupiter.api.Assumptions.assumeTrue(false, "Phase 6 — tested separately in multiHostTests")

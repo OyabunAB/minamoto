@@ -10,11 +10,14 @@ import org.testcontainers.images.builder.ImageFromDockerfile
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
 import se.oyabun.aelv.Many
+import se.oyabun.aelv.One
 import se.oyabun.aelv.Verify
 import se.oyabun.aelv.delaySubscription
 import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.map
 import se.oyabun.aelv.merge
+import se.oyabun.aelv.resource
+import se.oyabun.aelv.subscribeOn
 import se.oyabun.aelv.then
 import se.oyabun.aelv.toMany
 import se.oyabun.minamoto.postgres.HostSelectionStrategy
@@ -156,7 +159,7 @@ class ConnectionManagementIntegrationTest {
             // --- Deferred/Phase 6 stubs ---
 
             dynamicTest("SCRAM-SHA-256-PLUS succeeds with channel binding") {
-                org.junit.jupiter.api.Assumptions.assumeTrue(false, "Phase 5 deferred — SCRAM-SHA-256-PLUS not yet implemented")
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "Phase 5 — tested separately in scramPlusTests")
             },
             dynamicTest("password supplier called on each new connection") {
                 val callCount = java.util.concurrent.atomic.AtomicInteger(0)
@@ -199,6 +202,75 @@ class ConnectionManagementIntegrationTest {
                     assertIs<DatabaseException.QueryCancelled>(error)
                 }
                 Verify.that(p.close()).completesNormally()
+            },
+
+            dynamicTest("stop container") { postgres.stop() },
+        )
+    }
+
+    @TestFactory
+    fun `scram plus tests`(): List<org.junit.jupiter.api.DynamicNode> {
+        // Container with SSL enabled and hostssl in pg_hba.conf so Postgres offers SCRAM-SHA-256-PLUS
+        val initScript = """
+            #!/bin/sh
+            cp /ssl/server.crt "${'$'}PGDATA/server.crt"
+            cp /ssl/server.key "${'$'}PGDATA/server.key"
+            chmod 600 "${'$'}PGDATA/server.key"
+            printf '\nssl = on\nssl_cert_file = '"'"'server.crt'"'"'\nssl_key_file = '"'"'server.key'"'"'\n' >> "${'$'}PGDATA/postgresql.conf"
+            # Replace host entries with hostssl so SCRAM-SHA-256-PLUS is offered
+            sed -i 's/^host /hostssl /g' "${'$'}PGDATA/pg_hba.conf"
+        """.trimIndent()
+
+        val dockerfile = """
+            FROM postgres:17-alpine
+            RUN apk add --no-cache openssl && \
+                mkdir -p /ssl && \
+                openssl req -new -x509 -nodes -days 3650 \
+                    -subj "/CN=localhost" \
+                    -keyout /ssl/server.key \
+                    -out /ssl/server.crt && \
+                chmod 600 /ssl/server.key && \
+                chown postgres:postgres /ssl/server.key /ssl/server.crt
+            COPY init.sh /docker-entrypoint-initdb.d/init.sh
+            RUN chmod +x /docker-entrypoint-initdb.d/init.sh
+        """.trimIndent()
+
+        val image = ImageFromDockerfile()
+            .withFileFromString("Dockerfile", dockerfile)
+            .withFileFromString("init.sh", initScript)
+            .get()
+
+        val postgres = PostgreSQLContainer(
+            DockerImageName.parse(image).asCompatibleSubstituteFor("postgres")
+        ).withDatabaseName("testdb").withUsername("testuser").withPassword("testpass")
+
+        return listOf(
+            dynamicTest("start container") { postgres.start() },
+
+            dynamicTest("SCRAM-SHA-256-PLUS succeeds with channel binding") {
+                val database = PostgresDatabase(ConnectionConfig(
+                    host     = postgres.host,
+                    port     = postgres.firstMappedPort,
+                    user     = postgres.username,
+                    password = { postgres.password },
+                    database = postgres.databaseName,
+                    sslMode  = se.oyabun.aelv.netty.SslMode.Require,
+                ))
+                // pg_hba.conf uses hostssl so the server offers SCRAM-SHA-256-PLUS.
+                // A successful query proves channel binding worked — a wrong binding digest
+                // causes the server to reject with SCRAM authentication failed.
+                Verify.that(
+                    One.resource(
+                        acquire = { One.defer { database.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 1,
+                            acquireTimeout = 5.seconds, createTimeout = 10.seconds, validation = ValidationQuery.None)) } },
+                        release = { pool, _ -> pool.close() },
+                        use     = { pool ->
+                            database.query("SELECT current_user AS u").single()
+                                .map { it.get<String>("u") }
+                                .subscribeOn(PoolContext(pool))
+                        },
+                    )
+                ).assertNext { assertEquals(postgres.username, it) }.completesNormally(within = 10.seconds)
             },
 
             dynamicTest("stop container") { postgres.stop() },

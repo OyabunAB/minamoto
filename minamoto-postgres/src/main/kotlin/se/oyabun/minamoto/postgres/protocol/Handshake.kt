@@ -15,6 +15,7 @@
  */
 package se.oyabun.minamoto.postgres.protocol
 
+import se.oyabun.aelv.netty.ChannelBinding
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
@@ -61,6 +62,7 @@ internal fun PostgresConnection.handshake(
     statementTimeout:                kotlin.time.Duration? = null,
     lockTimeout:                     kotlin.time.Duration? = null,
     idleInTransactionSessionTimeout: kotlin.time.Duration? = null,
+    channelBinding:                  ChannelBinding        = ChannelBinding.None,
 ): One<KeyData> {
     val log = Logging.of<PostgresConnection>()
     log.protocol.handshakeStarted(id)
@@ -84,10 +86,10 @@ internal fun PostgresConnection.handshake(
     .or { throw DatabaseException.InvalidState("no auth message received during handshake") }
     .flatMap { authMessage ->
         when (authMessage) {
-            is Authentication.Ok                -> { log.protocol.authRequired(id, "none"); None.complete<BackendMessage>() }
-            is Authentication.CleartextPassword -> { log.protocol.authRequired(id, "cleartext"); sendPassword(password) }
-            is Authentication.MD5Password       -> { log.protocol.authRequired(id, "md5"); sendPassword(md5Password(user, password, authMessage.salt)) }
-            is Authentication.SASL              -> { log.protocol.authRequired(id, "scram-sha-256"); performScram(user, password, authMessage) }
+            is Authentication.Ok                -> log.protocol.authRequired(id, "none")       { None.complete<BackendMessage>() }
+            is Authentication.CleartextPassword -> log.protocol.authRequired(id, "cleartext")  { sendPassword(password) }
+            is Authentication.MD5Password       -> log.protocol.authRequired(id, "md5")        { sendPassword(md5Password(user, password, authMessage.salt)) }
+            is Authentication.SASL              -> log.protocol.authRequired(id, "scram")      { performScram(user, password, authMessage, channelBinding) }
             is ErrorResponse                    -> None.error<BackendMessage>(DatabaseException.AuthenticationFailed(authMessage.message))
             else -> None.error<BackendMessage>(DatabaseException.InvalidState("unexpected message during auth: $authMessage"))
         }
@@ -120,16 +122,25 @@ private fun PostgresConnection.sendPassword(password: String): None<BackendMessa
      }
 
 private fun PostgresConnection.performScram(
-    user:     String,
-    password: String,
-    message:  Authentication.SASL,
+    user:           String,
+    password:       String,
+    message:        Authentication.SASL,
+    channelBinding: ChannelBinding,
 ): None<BackendMessage> {
-    val mechanism = message.mechanisms.firstOrNull { it == SCRAM_SHA_256 }
-        ?: return None.error(DatabaseException.AuthenticationFailed("server does not support $SCRAM_SHA_256, offered: ${message.mechanisms}"))
+    val (mechanism, gs2Header, bindingDataBytes) = when {
+        channelBinding is ChannelBinding.TlsServerEndPoint &&
+        SCRAM_SHA_256_PLUS in message.mechanisms ->
+            Triple(SCRAM_SHA_256_PLUS, "p=$CB_TYPE_TLS_SERVER_END_POINT,,", channelBinding.digest)
+        SCRAM_SHA_256 in message.mechanisms ->
+            Triple(SCRAM_SHA_256, "n,,", null)
+        else -> return None.error(DatabaseException.AuthenticationFailed(
+            "server does not support $SCRAM_SHA_256 or $SCRAM_SHA_256_PLUS, offered: ${message.mechanisms}"
+        ))
+    }
 
     val clientNonce     = generateNonce()
     val clientFirstBare = "n=$user,r=$clientNonce"
-    val clientFirst     = "$GS2_HEADER$clientFirstBare"
+    val clientFirst     = "$gs2Header$clientFirstBare"
 
     return exchange(
         messages  = listOf(SASLInitialResponse(mechanism, clientFirst.toByteArray(Charsets.UTF_8))),
@@ -148,12 +159,15 @@ private fun PostgresConnection.performScram(
          if (!serverNonce.startsWith(clientNonce))
              return@flatMapNone None.error<BackendMessage>(DatabaseException.AuthenticationFailed("server nonce does not start with client nonce"))
 
-         val saltedPassword          = pbkdf2(password, salt, iterations)
-         val clientKey               = hmacSha256(saltedPassword, CLIENT_KEY)
-         val storedKey               = sha256(clientKey)
-         val serverKey               = hmacSha256(saltedPassword, SERVER_KEY)
-         val channelBinding          = Base64.getEncoder().encodeToString(GS2_HEADER.toByteArray(Charsets.UTF_8))
-         val clientFinalWithoutProof = "c=$channelBinding,r=$serverNonce"
+         val saltedPassword = pbkdf2(password, salt, iterations)
+         val clientKey      = hmacSha256(saltedPassword, CLIENT_KEY)
+         val storedKey      = sha256(clientKey)
+         val serverKey      = hmacSha256(saltedPassword, SERVER_KEY)
+
+         val gs2HeaderBytes  = gs2Header.toByteArray(Charsets.UTF_8)
+         val cbInput         = if (bindingDataBytes != null) gs2HeaderBytes + bindingDataBytes else gs2HeaderBytes
+         val channelBindingB64       = Base64.getEncoder().encodeToString(cbInput)
+         val clientFinalWithoutProof = "c=$channelBindingB64,r=$serverNonce"
          val authMessage2            = "$clientFirstBare,$serverFirst,$clientFinalWithoutProof"
          val clientSignature         = hmacSha256(storedKey, authMessage2)
          val clientProof             = xorBytes(clientKey, clientSignature)
@@ -181,13 +195,14 @@ private fun PostgresConnection.performScram(
      }
 }
 
-private const val SCRAM_SHA_256          = "SCRAM-SHA-256"
-private const val HMAC_SHA256            = "HmacSHA256"
-private const val PBKDF2_HMAC_SHA256     = "PBKDF2WithHmacSHA256"
-private const val CLIENT_KEY             = "Client Key"
-private const val SERVER_KEY             = "Server Key"
-private const val GS2_HEADER            = "n,,"
-private const val SCRAM_SHA_256_KEY_BITS = 256
+private const val SCRAM_SHA_256              = "SCRAM-SHA-256"
+private const val SCRAM_SHA_256_PLUS         = "SCRAM-SHA-256-PLUS"
+private const val CB_TYPE_TLS_SERVER_END_POINT = "tls-server-end-point"
+private const val HMAC_SHA256                = "HmacSHA256"
+private const val PBKDF2_HMAC_SHA256         = "PBKDF2WithHmacSHA256"
+private const val CLIENT_KEY                 = "Client Key"
+private const val SERVER_KEY                 = "Server Key"
+private const val SCRAM_SHA_256_KEY_BITS     = 256
 
 private fun generateNonce(): String {
     val bytes = ByteArray(24)

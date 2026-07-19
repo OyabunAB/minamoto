@@ -38,10 +38,13 @@ import se.oyabun.aelv.then
 import se.oyabun.aelv.thenReturn
 import se.oyabun.aelv.then
 import se.oyabun.aelv.toMany
+import se.oyabun.aelv.netty.ChannelBinding
 import se.oyabun.aelv.netty.NettyConnection
 import se.oyabun.aelv.netty.NettyTransport
 import se.oyabun.aelv.netty.SslMode
 import se.oyabun.aelv.netty.TcpOptions
+import se.oyabun.aelv.netty.channelBinding
+import se.oyabun.aelv.netty.upgradeTls
 import se.oyabun.aelv.netty.inbound
 import se.oyabun.aelv.netty.readRawByte
 import se.oyabun.aelv.netty.upgradeTls
@@ -196,9 +199,9 @@ internal class PostgresConnection(
         }
 
     override fun close(): None<Unit> =
-        None.defer<Unit> { log.connection.closing(id); state = ConnectionState.Closing; subscription.cancel() }
+        None.defer<Unit> { log.connection.closing(id) { state = ConnectionState.Closing; subscription.cancel() } }
             .then { connection.write(MessageEncoder.encode(Terminate, allocator)) }
-            .then { None.defer<Unit> { connection.channel.close().sync(); log.connection.closed(id); state = ConnectionState.Closed } }
+            .then { None.defer<Unit> { connection.channel.close().sync(); log.connection.closed(id) { state = ConnectionState.Closed } } }
 
     private fun executeSimple(sql: String): None<Unit> =
         exchange(
@@ -329,9 +332,9 @@ class PostgresConnectionFactory(
             transport.connect(host.hostname, host.port, config.tcpOptions))
         .flatMap { nettyConnection ->
             negotiateSsl(nettyConnection, host.hostname, config.sslMode)
-                .thenReturn(nettyConnection)
+                .map { channelBinding -> nettyConnection to channelBinding }
         }
-        .flatMap { nettyConnection ->
+        .flatMap { (nettyConnection, channelBinding) ->
             val connection = PostgresConnection(
                 id         = ConnectionId(idCounter.incrementAndGet()),
                 connection = nettyConnection,
@@ -348,6 +351,7 @@ class PostgresConnectionFactory(
                 statementTimeout                = config.statementTimeout,
                 lockTimeout                     = config.lockTimeout,
                 idleInTransactionSessionTimeout = config.idleInTransactionSessionTimeout,
+                channelBinding                  = channelBinding,
             ).map { keyData -> connection.backendKeyData = keyData; connection }
         }
         .flatMap { connection ->
@@ -386,19 +390,22 @@ class PostgresConnectionFactory(
  * because [PostgresConnection] subscribes to [inbound][NettyConnection] on construction
  * and would consume the 'S'/'N' byte before [readRawByte] can intercept it.
  */
-private fun negotiateSsl(connection: NettyConnection, host: String, sslMode: SslMode): None<Byte> {
-    if (sslMode is SslMode.Disable) return None.complete()
+private fun negotiateSsl(connection: NettyConnection, host: String, sslMode: SslMode): One<ChannelBinding> {
+    if (sslMode is SslMode.Disable) return One.single(ChannelBinding.None)
     val allocator = connection.channel.alloc()
     val buf = allocator.buffer(8).also { it.writeInt(8); it.writeInt(80877103) }
     return connection.write(buf)
         .then { One.defer { connection.readRawByte() } }
-        .flatMapNone { response ->
+        .flatMap { response ->
             when {
                 response == 'S'.code.toByte() ->
-                    None.defer<Byte> { connection.upgradeTls(sslMode, host) }
+                    One.defer<ChannelBinding> {
+                        connection.upgradeTls(sslMode, host)
+                        connection.channelBinding()
+                    }
                 response == 'N'.code.toByte() && sslMode is SslMode.Prefer ->
-                    None.complete<Byte>()
-                else -> None.error<Byte>(DatabaseException.TlsFailed(
+                    One.single(ChannelBinding.None)
+                else -> One.error<ChannelBinding>(DatabaseException.TlsFailed(
                     "server declined TLS (response: '${response.toInt().toChar()}') but mode $sslMode requires it"
                 ))
             }

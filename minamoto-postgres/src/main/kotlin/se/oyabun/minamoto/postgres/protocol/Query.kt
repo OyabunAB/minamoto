@@ -20,8 +20,6 @@ import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
-import se.oyabun.aelv.discard
-import se.oyabun.aelv.doOnComplete
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.fold
 import se.oyabun.aelv.resource

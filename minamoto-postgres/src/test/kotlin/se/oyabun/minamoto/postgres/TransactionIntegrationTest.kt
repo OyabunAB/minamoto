@@ -11,9 +11,7 @@ import se.oyabun.aelv.Verify
 import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.map
-import se.oyabun.aelv.recover
 import se.oyabun.aelv.then
-import se.oyabun.aelv.toMany
 import se.oyabun.minamoto.IsolationLevel
 import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.TransactionDefinition
@@ -66,7 +64,7 @@ class TransactionIntegrationTest {
             dynamicTest("commit persists inserted row") {
                 // DDL setup outside transaction
                 Verify.that(
-                    database.run("CREATE TABLE IF NOT EXISTS commit_test (id int)").execute().then { database.run("DELETE FROM commit_test").execute().toMany<Unit>() }, context = PoolContext(pool),
+                    database.run("CREATE TABLE IF NOT EXISTS commit_test (id int)").execute().then { database.run("DELETE FROM commit_test").execute().toMany() }, context = PoolContext(pool),
                 ).completesNormally(within = TEST_TIMEOUT)
 
                 Verify.that(
@@ -85,7 +83,7 @@ class TransactionIntegrationTest {
 
             dynamicTest("rollback discards inserted row") {
                 Verify.that(
-                    database.run("CREATE TABLE IF NOT EXISTS rollback_test (id int)").execute().then { database.run("DELETE FROM rollback_test").execute().toMany<Unit>() }, context = PoolContext(pool),
+                    database.run("CREATE TABLE IF NOT EXISTS rollback_test (id int)").execute().then { database.run("DELETE FROM rollback_test").execute().toMany() }, context = PoolContext(pool),
                 ).completesNormally(within = TEST_TIMEOUT)
 
                 Verify.that(
@@ -93,7 +91,7 @@ class TransactionIntegrationTest {
                         database.modify("INSERT INTO rollback_test VALUES (1)").count()
                             .flatMapMany { Many.error<Long>(RuntimeException("intentional rollback")) }
                     }, context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT)
+                ).failed(within = TEST_TIMEOUT)
 
                 Verify.that(
                     database.query("SELECT count(*) AS n FROM rollback_test").single()
@@ -105,7 +103,7 @@ class TransactionIntegrationTest {
 
             dynamicTest("nested transactionally uses savepoint — inner rollback preserved outer") {
                 Verify.that(
-                    database.run("CREATE TABLE IF NOT EXISTS savepoint_test (id int)").execute().then { database.run("DELETE FROM savepoint_test").execute().toMany<Unit>() }, context = PoolContext(pool),
+                    database.run("CREATE TABLE IF NOT EXISTS savepoint_test (id int)").execute().then { database.run("DELETE FROM savepoint_test").execute().toMany() }, context = PoolContext(pool),
                 ).completesNormally(within = TEST_TIMEOUT)
 
                 val savepointPipeline: Many<Long> = transactionally(block = fun(): Many<Long> {
@@ -127,7 +125,7 @@ class TransactionIntegrationTest {
 
             dynamicTest("nested savepoint released commits inner work") {
                 Verify.that(
-                    database.run("CREATE TABLE IF NOT EXISTS sp_release (id int)").execute().then { database.run("DELETE FROM sp_release").execute().toMany<Unit>() }, context = PoolContext(pool),
+                    database.run("CREATE TABLE IF NOT EXISTS sp_release (id int)").execute().then { database.run("DELETE FROM sp_release").execute().toMany() }, context = PoolContext(pool),
                 ).completesNormally(within = TEST_TIMEOUT)
 
                 val releasePipeline: Many<Long> = transactionally(block = fun(): Many<Long> {
@@ -148,7 +146,7 @@ class TransactionIntegrationTest {
 
             dynamicTest("multiple nested savepoints compose correctly") {
                 Verify.that(
-                    database.run("CREATE TABLE IF NOT EXISTS sp_nest (id int)").execute().then { database.run("DELETE FROM sp_nest").execute().toMany<Unit>() }, context = PoolContext(pool),
+                    database.run("CREATE TABLE IF NOT EXISTS sp_nest (id int)").execute().then { database.run("DELETE FROM sp_nest").execute().toMany() }, context = PoolContext(pool),
                 ).completesNormally(within = TEST_TIMEOUT)
 
                 val nestPipeline: Many<Long> = transactionally(block = fun(): Many<Long> {
@@ -205,14 +203,14 @@ class TransactionIntegrationTest {
 
             dynamicTest("READ ONLY transaction prevents writes") {
                 Verify.that(
-                    database.run("CREATE TABLE IF NOT EXISTS readonly_test (id int)").execute().then { database.run("DELETE FROM readonly_test").execute().toMany<Unit>() }, context = PoolContext(pool),
+                    database.run("CREATE TABLE IF NOT EXISTS readonly_test (id int)").execute().then { database.run("DELETE FROM readonly_test").execute().toMany() }, context = PoolContext(pool),
                 ).completesNormally(within = TEST_TIMEOUT)
 
                 Verify.that(
                     transactionally(TransactionDefinition(mutability = TransactionMutability.ReadOnly)) {
                         database.modify("INSERT INTO readonly_test VALUES (1)").count().toMany()
                     }, context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT)
+                ).failed(within = TEST_TIMEOUT)
             },
 
             dynamicTest("DEFERRABLE SERIALIZABLE READ ONLY accepted by server") {

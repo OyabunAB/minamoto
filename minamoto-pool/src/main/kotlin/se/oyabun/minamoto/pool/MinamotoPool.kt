@@ -31,12 +31,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 import se.oyabun.aelv.Signal
 import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
-import se.oyabun.aelv.discard
-import se.oyabun.aelv.doFinally
 import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.firstMaybe
 import se.oyabun.aelv.or
-import se.oyabun.aelv.toMany
 import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.getOrThrow
 import se.oyabun.aelv.map
@@ -44,14 +41,10 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 import se.oyabun.aelv.drain
-import se.oyabun.aelv.recover
 import se.oyabun.aelv.resource
-import se.oyabun.aelv.retry
 import se.oyabun.aelv.subscribeOn
 import se.oyabun.aelv.Either
 import se.oyabun.aelv.then
-import se.oyabun.aelv.thenReturn
-import se.oyabun.aelv.toMany
 import se.oyabun.aelv.TimeoutException
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.coroutineContext
@@ -181,7 +174,7 @@ class MinamotoPool(
                     .map { slot: PoolSlot -> slot.copy(state = SlotState.Acquired, lastUsed = System.nanoTime()).also { slots[it.id] = it } }
                     .flatMap { slot -> validateAndHook(slot) }
                     .map { slot -> ctx.acquire(slot.id, poolId); AcquireResult.Acquired(slot) as AcquireResult }
-                    .recover { e -> if (e is TimeoutException) AcquireResult.TimedOut else throw e }
+                    .recover { e -> if (e is TimeoutException) One.single(AcquireResult.TimedOut as AcquireResult) else throw e }
             }
 
     private fun validateAndHook(slot: PoolSlot): One<PoolSlot> =

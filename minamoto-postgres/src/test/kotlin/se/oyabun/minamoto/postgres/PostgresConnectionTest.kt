@@ -107,7 +107,7 @@ class PostgresConnectionTest {
                 Verify.that(
                     badDatabase.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(badPool),
-                ).completesWithError(within = 15.seconds)
+                ).failed(within = 15.seconds)
                 Verify.that(badPool.close()).completesNormally()
             },
 

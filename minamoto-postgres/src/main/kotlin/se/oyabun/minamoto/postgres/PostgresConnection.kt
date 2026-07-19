@@ -24,7 +24,6 @@ import se.oyabun.aelv.None
 import se.oyabun.aelv.ReplaySink
 import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
-import se.oyabun.aelv.discard
 import se.oyabun.aelv.drain
 import se.oyabun.aelv.firstMaybe
 import se.oyabun.aelv.flatMap
@@ -33,11 +32,7 @@ import se.oyabun.aelv.fold
 import se.oyabun.aelv.getOrThrow
 import se.oyabun.aelv.map
 import se.oyabun.aelv.or
-import se.oyabun.aelv.recover
 import se.oyabun.aelv.then
-import se.oyabun.aelv.thenReturn
-import se.oyabun.aelv.then
-import se.oyabun.aelv.toMany
 import se.oyabun.aelv.netty.ChannelBinding
 import se.oyabun.aelv.netty.NettyConnection
 import se.oyabun.aelv.netty.NettyTransport

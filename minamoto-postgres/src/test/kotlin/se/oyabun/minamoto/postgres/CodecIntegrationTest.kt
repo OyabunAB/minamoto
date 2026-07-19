@@ -15,7 +15,6 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.Verify
 import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.map
-import se.oyabun.aelv.toMany
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.transactionally
@@ -195,10 +194,9 @@ class CodecIntegrationTest {
                 ).assertNext { row -> assertNull(row.getOrNull<String>("v")) }.completesNormally(within = TEST_TIMEOUT)
             },
             dynamicTest("SQL NULL with get throws UnexpectedNull") {
-                val error = Verify.that(
+                Verify.that(
                     database.query("SELECT NULL::text AS v").single().map { row -> row.get<String>("v") }, context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT)
-                assertIs<DatabaseException.UnexpectedNull>(error)
+                ).failedWith<DatabaseException.UnexpectedNull>(within = TEST_TIMEOUT)
             },
             dynamicTest("non-null value with getOrNull returns value") {
                 Verify.that(
@@ -286,21 +284,19 @@ class CodecIntegrationTest {
             // --- Server errors surface typed exceptions ---
 
             dynamicTest("server error surfaces UndefinedTable for unknown table") {
-                val error = Verify.that(
+                Verify.that(
                     database.query("SELECT * FROM nonexistent_table_xyz").multiple(), context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT)
-                assertIs<DatabaseException.UndefinedTable>(error)
+                ).failedWith<DatabaseException.UndefinedTable>(within = TEST_TIMEOUT)
             },
             dynamicTest("unique constraint violation surfaces UniqueViolation") {
-                val error = Verify.that(
+                Verify.that(
                     transactionally {
                         database.modify("CREATE TEMP TABLE IF NOT EXISTS uniq_test (id int PRIMARY KEY)").count()
                             .flatMap { database.modify("INSERT INTO uniq_test VALUES (1)").count() }
                             .flatMap { database.modify("INSERT INTO uniq_test VALUES (1)").count() }
                             .toMany()
                     }, context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT)
-                assertIs<DatabaseException.UniqueViolation>(error)
+                ).failedWith<DatabaseException.UniqueViolation>(within = TEST_TIMEOUT)
             },
 
             // --- JSON codecs ---

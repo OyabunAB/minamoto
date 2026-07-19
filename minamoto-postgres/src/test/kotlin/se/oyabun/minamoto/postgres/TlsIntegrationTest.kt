@@ -122,7 +122,7 @@ class TlsIntegrationTest {
                 val (db, pool) = connectWithPool(postgres, SslMode.Verify())
                 Verify.that(
                     db.query("SELECT 1 AS n").single().map { it.get<Int>("n") }, context = PoolContext(pool),
-                ).completesWithError(within = 15.seconds)
+                ).failed(within = 15.seconds)
                 Verify.that(pool.close()).completesNormally()
             },
 
@@ -149,7 +149,7 @@ class TlsIntegrationTest {
                 val (db, pool) = connectWithPool(postgres, SslMode.Require)
                 Verify.that(
                     db.query("SELECT 1 AS n").single().map { it.get<Int>("n") }, context = PoolContext(pool),
-                ).completesWithError(within = 15.seconds)
+                ).failed(within = 15.seconds)
                 Verify.that(pool.close()).completesNormally()
             },
 

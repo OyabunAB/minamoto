@@ -9,14 +9,12 @@ import org.testcontainers.utility.DockerImageName
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.One
 import se.oyabun.aelv.Verify
-import se.oyabun.aelv.discard
 import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.fold
 import se.oyabun.aelv.map
 import se.oyabun.aelv.take
 import se.oyabun.aelv.then
-import se.oyabun.aelv.toMany
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.pool.MinamotoPool
@@ -24,7 +22,6 @@ import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
 import se.oyabun.minamoto.transactionally
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
@@ -78,35 +75,35 @@ class ProtocolIntegrationTest {
                     database.run("INSERT INTO proto_test (val) VALUES ('dup')").execute()
                         .then { database.run("INSERT INTO proto_test (val) VALUES ('dup')").execute() },
                     context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT).also { assertIs<DatabaseException.UniqueViolation>(it) }
+                ).failedWith<DatabaseException.UniqueViolation>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("not-null violation sqlState 23502 surfaces as NotNullViolation") {
                 Verify.that(
                     database.run("INSERT INTO proto_test (val) VALUES (NULL)").execute(),
                     context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT).also { assertIs<DatabaseException.NotNullViolation>(it) }
+                ).failedWith<DatabaseException.NotNullViolation>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("foreign key violation sqlState 23503 surfaces as ForeignKeyViolation") {
                 Verify.that(
                     database.run("INSERT INTO proto_fk_child (parent_id) VALUES (999)").execute(),
                     context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT).also { assertIs<DatabaseException.ForeignKeyViolation>(it) }
+                ).failedWith<DatabaseException.ForeignKeyViolation>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("undefined table sqlState 42P01 surfaces as UndefinedTable") {
                 Verify.that(
                     database.query("SELECT * FROM no_such_table").multiple().discard(),
                     context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT).also { assertIs<DatabaseException.UndefinedTable>(it) }
+                ).failedWith<DatabaseException.UndefinedTable>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("undefined column sqlState 42703 surfaces as UndefinedColumn") {
                 Verify.that(
                     database.query("SELECT no_such_col FROM proto_test").multiple().discard(),
                     context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT).also { assertIs<DatabaseException.UndefinedColumn>(it) }
+                ).failedWith<DatabaseException.UndefinedColumn>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("permission denied sqlState 42501 surfaces as PermissionDenied") {
@@ -122,7 +119,7 @@ class ProtocolIntegrationTest {
                 Verify.that(
                     limitedDb.query("SELECT * FROM proto_test").multiple().discard(),
                     context = PoolContext(limitedPool),
-                ).completesWithError(within = TEST_TIMEOUT).also { assertIs<DatabaseException.PermissionDenied>(it) }
+                ).failedWith<DatabaseException.PermissionDenied>(within = TEST_TIMEOUT)
                 Verify.that(limitedPool.close()).completesNormally()
             },
 
@@ -130,7 +127,7 @@ class ProtocolIntegrationTest {
                 Verify.that(
                     database.query("SELEKT 1").multiple().discard(),
                     context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT).also { assertIs<DatabaseException.SyntaxError>(it) }
+                ).failedWith<DatabaseException.SyntaxError>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("large result set streams via PortalSuspended across multiple Execute rounds") {

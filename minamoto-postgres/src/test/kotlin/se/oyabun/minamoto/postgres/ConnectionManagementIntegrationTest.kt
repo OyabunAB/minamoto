@@ -12,7 +12,6 @@ import org.testcontainers.utility.DockerImageName
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.One
 import se.oyabun.aelv.Verify
-import se.oyabun.aelv.delaySubscription
 import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.map
@@ -20,7 +19,6 @@ import se.oyabun.aelv.merge
 import se.oyabun.aelv.resource
 import se.oyabun.aelv.subscribeOn
 import se.oyabun.aelv.then
-import se.oyabun.aelv.toMany
 import se.oyabun.minamoto.postgres.HostSelectionStrategy
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
@@ -29,7 +27,6 @@ import se.oyabun.minamoto.pool.MinamotoPool
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -207,9 +204,7 @@ class ConnectionManagementIntegrationTest {
                     .then { Many.empty<Row>() }
                 Verify.that(
                     merge(slowQuery, cancelAfterDelay), context = PoolContext(p),
-                ).completesWithError(within = 5.seconds).also { error ->
-                    assertIs<DatabaseException.QueryCancelled>(error)
-                }
+                ).failedWith<DatabaseException.QueryCancelled>(within = 5.seconds)
                 Verify.that(p.close()).completesNormally()
             },
 

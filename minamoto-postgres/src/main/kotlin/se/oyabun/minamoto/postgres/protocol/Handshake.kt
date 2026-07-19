@@ -26,7 +26,6 @@ import se.oyabun.aelv.fold
 import se.oyabun.aelv.map
 import se.oyabun.aelv.or
 import se.oyabun.aelv.then
-import se.oyabun.aelv.thenReturn
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.postgres.Logging
 import se.oyabun.minamoto.postgres.PostgresConnection

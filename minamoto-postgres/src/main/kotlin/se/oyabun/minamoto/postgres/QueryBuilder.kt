@@ -20,15 +20,12 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.Maybe
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
-import se.oyabun.aelv.discard
 import se.oyabun.aelv.firstMaybe
 import se.oyabun.aelv.flatMap
-import se.oyabun.aelv.doOnNext
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.or
 import se.oyabun.aelv.resource
-import se.oyabun.aelv.toMany
 import se.oyabun.minamoto.Binding
 import se.oyabun.minamoto.BoundModify
 import se.oyabun.minamoto.BoundRun

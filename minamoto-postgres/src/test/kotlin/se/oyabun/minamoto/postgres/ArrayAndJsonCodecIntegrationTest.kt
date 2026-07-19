@@ -20,7 +20,6 @@ import se.oyabun.minamoto.postgres.codec.CodecRegistry
 import java.math.BigDecimal
 import java.util.UUID
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.time.Duration.Companion.seconds
 
@@ -162,11 +161,10 @@ class ArrayAndJsonCodecIntegrationTest {
                 ).assertNext { assertEquals(listOf(42), it) }.completesNormally(within = TEST_TIMEOUT)
             },
             dynamicTest("null element in array throws CodecFailed") {
-                val error = Verify.that(
+                Verify.that(
                     database.query("SELECT ARRAY[1, NULL, 3]::int4[] AS v").single()
                         .map { row -> row.get<List<*>>("v") }, context = PoolContext(pool),
-                ).completesWithError(within = TEST_TIMEOUT)
-                assertIs<DatabaseException.CodecFailed>(error)
+                ).failedWith<DatabaseException.CodecFailed>(within = TEST_TIMEOUT)
             },
 
             // --- JSON codecs ---

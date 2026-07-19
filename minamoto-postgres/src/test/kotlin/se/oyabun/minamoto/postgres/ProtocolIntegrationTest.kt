@@ -10,6 +10,7 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.One
 import se.oyabun.aelv.Verify
 import se.oyabun.aelv.discard
+import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.fold
 import se.oyabun.aelv.map
@@ -21,6 +22,7 @@ import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.pool.MinamotoPool
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
+import se.oyabun.minamoto.transactionally
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -274,6 +276,58 @@ class ProtocolIntegrationTest {
                     context = PoolContext(noCachePool),
                 ).completesNormally(within = TEST_TIMEOUT)
                 Verify.that(noCachePool.close()).completesNormally()
+            },
+
+            dynamicTest("concurrent statements on one connection use distinct portal names") {
+                val inner: () -> Many<Int> = {
+                    database.query("SELECT id FROM proto_test ORDER BY id")
+                        .multiple()
+                        .flatMap { row: se.oyabun.minamoto.Row ->
+                            database.query("SELECT id FROM proto_test WHERE id = :id")
+                                .bind("id" to row.get<Int>("id"))
+                                .single()
+                                .map { it.get<Int>("id") }
+                                .toMany()
+                        }
+                }
+                Verify.that(
+                    pool.transactionally(se.oyabun.minamoto.TransactionDefinition(), inner),
+                    context = PoolContext(pool),
+                ).completesNormally(within = 5.seconds)
+            },
+
+            dynamicTest("invalidated cached statement is transparently re-prepared") {
+                val sql = "SELECT count(*) AS n FROM proto_cache_test"
+                val cachingDatabase = PostgresDatabase(ConnectionConfig(
+                    host               = postgres.host,
+                    port               = postgres.firstMappedPort,
+                    user               = postgres.username,
+                    password           = { postgres.password },
+                    database           = postgres.databaseName,
+                    statementCacheSize = 10,
+                ))
+                val cachingPool = cachingDatabase.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 1,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.run("CREATE TABLE proto_cache_test (id INT)").execute(),
+                    context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
+                Verify.that(
+                    cachingDatabase.query(sql).single().map { it.get<Long>("n") },
+                    context = PoolContext(cachingPool),
+                ).assertNext { assertEquals(0L, it) }.completesNormally(within = TEST_TIMEOUT)
+                // Drop and recreate — server invalidates the prepared statement (SQLSTATE 26000)
+                Verify.that(
+                    database.run("DROP TABLE proto_cache_test").execute()
+                        .then { database.run("CREATE TABLE proto_cache_test (id INT)").execute() },
+                    context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
+                // Driver must evict cache and re-prepare transparently
+                Verify.that(
+                    cachingDatabase.query(sql).single().map { it.get<Long>("n") },
+                    context = PoolContext(cachingPool),
+                ).assertNext { assertEquals(0L, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(cachingPool.close()).completesNormally()
             },
 
             dynamicTest("stop container") { postgres.stop() },

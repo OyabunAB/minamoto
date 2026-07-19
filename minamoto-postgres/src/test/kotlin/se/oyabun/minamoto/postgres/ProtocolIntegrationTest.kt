@@ -6,8 +6,11 @@ import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.One
 import se.oyabun.aelv.Verify
 import se.oyabun.aelv.discard
+import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.fold
 import se.oyabun.aelv.map
 import se.oyabun.aelv.take
@@ -21,6 +24,7 @@ import se.oyabun.minamoto.pool.ValidationQuery
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.seconds
 
 class ProtocolIntegrationTest {
 
@@ -64,7 +68,7 @@ class ProtocolIntegrationTest {
                         .then { database.run("CREATE TABLE proto_fk_child (parent_id INT REFERENCES proto_fk_parent(id))").execute() }
                         .then { database.run("CREATE USER limited_user PASSWORD 'pass' NOSUPERUSER").execute() },
                     context = PoolContext(pool),
-                ).completesNormally(within = TEST_TIMEOUT)
+                ).completesNormally(within = 5.seconds)
             },
 
             dynamicTest("unique constraint violation sqlState 23505 surfaces as UniqueViolation") {
@@ -208,6 +212,68 @@ class ProtocolIntegrationTest {
                     database.run("DO $$ BEGIN RAISE NOTICE 'test notice'; END $$").execute(),
                     context = PoolContext(pool),
                 ).completesNormally(within = TEST_TIMEOUT)
+            },
+
+            dynamicTest("same SQL executed twice reuses cached prepared statement") {
+                val sql = "SELECT val FROM proto_test LIMIT 1"
+                Verify.that(
+                    database.query(sql).single()
+                        .flatMapMany { database.query(sql).single().toMany() },
+                    context = PoolContext(pool),
+                ).completesNormally(within = TEST_TIMEOUT)
+            },
+
+            dynamicTest("cache eviction under bounded size forces re-prepare") {
+                val cachingDatabase = PostgresDatabase(ConnectionConfig(
+                    host               = postgres.host,
+                    port               = postgres.firstMappedPort,
+                    user               = postgres.username,
+                    password           = { postgres.password },
+                    database           = postgres.databaseName,
+                    statementCacheSize = 2,
+                ))
+                val cachingPool = cachingDatabase.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    cachingDatabase.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
+                    context = PoolContext(cachingPool),
+                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(
+                    cachingDatabase.query("SELECT 2 AS n").single().map { it.get<Int>("n") },
+                    context = PoolContext(cachingPool),
+                ).assertNext { assertEquals(2, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(
+                    cachingDatabase.query("SELECT 3 AS n").single().map { it.get<Int>("n") },
+                    context = PoolContext(cachingPool),
+                ).assertNext { assertEquals(3, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(
+                    cachingDatabase.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
+                    context = PoolContext(cachingPool),
+                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
+                Verify.that(cachingPool.close()).completesNormally()
+            },
+
+            dynamicTest("disabled cache re-parses on every execution") {
+                val noCacheDatabase = PostgresDatabase(ConnectionConfig(
+                    host               = postgres.host,
+                    port               = postgres.firstMappedPort,
+                    user               = postgres.username,
+                    password           = { postgres.password },
+                    database           = postgres.databaseName,
+                    statementCacheSize = 0,
+                ))
+                val noCachePool = noCacheDatabase.pool(PoolConfig(initialSize = 1, minIdle = 1, maxSize = 1,
+                    validation = ValidationQuery.None))
+                val sql = "SELECT val FROM proto_test LIMIT 1"
+                Verify.that(
+                    noCacheDatabase.query(sql).single().map { it.get<String>("val") },
+                    context = PoolContext(noCachePool),
+                ).completesNormally(within = TEST_TIMEOUT)
+                Verify.that(
+                    noCacheDatabase.query(sql).single().map { it.get<String>("val") },
+                    context = PoolContext(noCachePool),
+                ).completesNormally(within = TEST_TIMEOUT)
+                Verify.that(noCachePool.close()).completesNormally()
             },
 
             dynamicTest("stop container") { postgres.stop() },

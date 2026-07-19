@@ -28,6 +28,7 @@ import se.oyabun.minamoto.postgres.Column
 import se.oyabun.minamoto.postgres.Parameter
 import se.oyabun.minamoto.postgres.Parameters
 import se.oyabun.minamoto.postgres.PostgresConnection
+import se.oyabun.minamoto.postgres.PreparedStatementCache
 import se.oyabun.minamoto.postgres.PostgresRow
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.CommandComplete
 import se.oyabun.minamoto.postgres.protocol.BackendMessage.DataRow
@@ -44,8 +45,10 @@ import se.oyabun.minamoto.postgres.protocol.FrontendMessage.Sync
 /**
  * Executes a query using the PGwire extended query protocol, streaming typed [Row]s.
  *
- * Phase 1: Parse + Describe(Statement) + Sync — learns column OIDs and preferred formats.
- * Phase 2: Bind (with per-column result formats from the codec registry) + Execute + Sync.
+ * When [PostgresConnection.statementCache] is enabled and [statement] has been executed
+ * before, the `Parse` + `Describe` round-trip is skipped and the cached statement name
+ * and column descriptions are reused directly. On first execution the statement is
+ * parsed under a generated name and cached.
  *
  * Backpressure propagates via [Execute.maxRows]. [PortalSuspended] triggers subsequent
  * [Execute] messages until all rows are delivered.
@@ -56,47 +59,44 @@ internal fun PostgresConnection.executeQuery(
     fetchSize:  Int        = 50,
 ): Many<Row> {
     val portalName = ""
+    return parseAndDescribe(statement)
+        .fold(emptyList<Column.Description>()) { acc, col -> acc + col }
+        .flatMapMany(transform = suspend { descriptions: List<Column.Description> ->
+            val statementName = statementCache.get(statement)?.name ?: ""
+            val resultFormats = descriptions.map { registry.preferredFormat(it.typeOid).wire }
+                .distinct()
+                .let { formats ->
+                    if (formats.size == 1) listOf(formats.first())
+                    else descriptions.map { col -> registry.preferredFormat(col.typeOid).wire }
+                }
 
-    return Many.defer(factory = suspend {
-        exchange(
-            messages  = listOf(Parse("", statement), Describe(DescribeTarget.Statement, ""), Sync),
-            takeUntil = { it is ReadyForQuery },
-        )
-    }).concatMap { message ->
-        when (message) {
-            is RowDescription -> Many.items(message.columns)
-            is ErrorResponse  -> Many.error(message.asException())
-            else              -> Many.empty()
-        }
-    }.fold(emptyList<Column.Description>()) { _, columns -> columns }
-     .flatMapMany(transform = suspend { descriptions: List<Column.Description> ->
-         val resultFormats = descriptions.map { registry.preferredFormat(it.typeOid).wire }
-             .distinct()
-             .let { if (it.size == 1) listOf(it.first()) else descriptions.map { col -> registry.preferredFormat(col.typeOid).wire } }
-
-         exchange(
-             messages  = listOf(
-                 Bind(portalName, "", parameters, resultFormats = resultFormats),
-                 Execute(portalName, fetchSize),
-                 Sync,
-             ),
-             takeUntil = { it is ReadyForQuery },
-         ).concatMap { message ->
-             when (message) {
-                 is DataRow         -> Many.items(buildRow(message, descriptions))
-                 is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions, parameters)
-                 is ErrorResponse   -> Many.error(message.asException())
-                 else               -> Many.empty()
-             }
-         }
-     })
+            exchange(
+                messages  = listOf(
+                    Bind(portalName, statementName, parameters, resultFormats = resultFormats),
+                    Execute(portalName, fetchSize),
+                    Sync,
+                ),
+                takeUntil = { it is ReadyForQuery },
+            ).concatMap { message ->
+                when (message) {
+                    is DataRow         -> Many.items(buildRow(message, descriptions))
+                    is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions, parameters)
+                    is ErrorResponse   -> {
+                        if (message.sqlState == INVALID_PREPARED_STATEMENT) {
+                            statementCache.evict(statement)
+                            executeQuery(statement, parameters, fetchSize)
+                        } else {
+                            Many.error(message.asException())
+                        }
+                    }
+                    else               -> Many.empty()
+                }
+            }
+        })
 }
 
 /**
- * Executes a command and returns the number of rows affected from [CommandComplete].
- *
- * The tag format is "INSERT 0 n", "UPDATE n", "DELETE n", "SELECT n", etc.
- * The affected count is the last whitespace-delimited token.
+ * Executes a DML command and returns the number of affected rows from [CommandComplete].
  */
 internal fun PostgresConnection.executeCommand(
     statement:  String,
@@ -137,6 +137,44 @@ internal fun PostgresConnection.executeEffect(
 }).fold(Unit) { _, message ->
     if (message is ErrorResponse) throw message.asException()
 }.discard()
+
+/**
+ * Returns column descriptions for [statement], using the cache when available.
+ *
+ * On a cache hit, returns the stored [Column.Description]s immediately without a round-trip.
+ * On a cache miss, generates a statement name, sends `Parse` + `Describe` + `Sync`, caches
+ * the result, and emits the [Column.Description]s from the server's [RowDescription].
+ * Any evicted statement is closed on the server before the new `Parse` is sent.
+ */
+private fun PostgresConnection.parseAndDescribe(statement: String): Many<Column.Description> {
+    val cached = statementCache.get(statement)
+    if (cached != null) return Many.items(*cached.descriptions.toTypedArray())
+
+    val name = statementCache.nextName()
+    statementCache.put(statement, PreparedStatementCache.Entry(name, emptyList()))
+
+    return Many.defer(factory = suspend {
+        exchange(
+            messages  = if (name.isEmpty())
+                listOf(Parse("", statement), Describe(DescribeTarget.Statement, ""), Sync)
+            else
+                listOf(Parse(name, statement), Describe(DescribeTarget.Statement, name), Sync),
+            takeUntil = { it is ReadyForQuery },
+        )
+    }).concatMap { message ->
+        when (message) {
+            is RowDescription -> {
+                if (name.isNotEmpty()) statementCache.put(statement, PreparedStatementCache.Entry(name, message.columns))
+                Many.items(*message.columns.toTypedArray())
+            }
+            is ErrorResponse  -> {
+                statementCache.evict(statement)
+                Many.error(message.asException())
+            }
+            else              -> Many.empty()
+        }
+    }
+}
 
 private fun PostgresConnection.fetchMore(
     portalName:   String,
@@ -191,3 +229,5 @@ private fun ErrorResponse.asException(): DatabaseException = when (sqlState) {
         hint     = hint,
     )
 }
+
+private const val INVALID_PREPARED_STATEMENT = "26000"

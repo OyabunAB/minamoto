@@ -94,6 +94,7 @@ internal class PostgresConnection(
     private  val transport:  NettyTransport,
     internal val registry:   CodecRegistry    = CodecRegistry(),
     internal val allocator:  ByteBufAllocator = connection.channel.alloc(),
+    internal val statementCache: PreparedStatementCache = PreparedStatementCache(0),
 ) : Connection {
 
     private val log = Logging.of<PostgresConnection>()
@@ -107,7 +108,7 @@ internal class PostgresConnection(
     /** Backend key data received during handshake — used to send [CancelRequest] on a separate connection. */
     internal var backendKeyData: KeyData? = null
 
-    private val writeMutex    = Mutex()
+    internal val writeMutex    = Mutex()
     private val conversations = ConcurrentLinkedQueue<Conversation>()
 
     private val subscription = connection.inbound()
@@ -303,6 +304,12 @@ data class ConnectionConfig(
     val unixSocketPath:                  String?                               = null,
     /** Controls the PGwire `Execute.maxRows` per round-trip. 50 means 50 rows per Execute → PortalSuspended → next Execute cycle. Increase for large result sets to reduce round-trips. */
     val defaultFetchSize:                Int                                   = 50,
+    /**
+     * Maximum number of named prepared statements cached per physical connection.
+     * Cached statements skip the `Parse` + `Describe` round-trip on repeated execution.
+     * Set to 0 to disable caching — every execution re-parses.
+     */
+    val statementCacheSize:              Int                                   = 256,
 ) {
     /** Resolved host list — [hosts] if non-empty, otherwise the single [host]/[port] pair. */
     fun resolvedHosts(): List<Host> =
@@ -336,10 +343,11 @@ class PostgresConnectionFactory(
         }
         .flatMap { (nettyConnection, channelBinding) ->
             val connection = PostgresConnection(
-                id         = ConnectionId(idCounter.incrementAndGet()),
-                connection = nettyConnection,
-                transport  = transport,
-                registry   = registry,
+                id             = ConnectionId(idCounter.incrementAndGet()),
+                connection     = nettyConnection,
+                transport      = transport,
+                registry       = registry,
+                statementCache = PreparedStatementCache(config.statementCacheSize),
             )
             connection.handshake(
                 user                            = config.user,

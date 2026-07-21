@@ -104,4 +104,11 @@ internal val arrayOidByElementOid: Map<Int, Int> = mapOf(
     Oid.JSON        to Oid.JSON_ARRAY,
     Oid.JSONB       to Oid.JSONB_ARRAY,
     Oid.INET        to Oid.INET_ARRAY,
+    Oid.POINT       to Oid.POINT_ARRAY,
+    Oid.LSEG        to Oid.LSEG_ARRAY,
+    Oid.PATH        to Oid.PATH_ARRAY,
+    Oid.BOX         to Oid.BOX_ARRAY,
+    Oid.POLYGON     to Oid.POLYGON_ARRAY,
+    Oid.LINE        to Oid.LINE_ARRAY,
+    Oid.CIRCLE      to Oid.CIRCLE_ARRAY,
 )

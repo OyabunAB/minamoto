@@ -23,6 +23,7 @@ import java.net.InetAddress
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
@@ -69,6 +70,7 @@ class ExtendedTypeIntegrationTest {
                 postgres.start()
                 val registry = CodecRegistry(discoverRegistrars = false).also {
                     it.registerEnum<Mood>()
+                    it.registerHstore()
                 }
                 database = PostgresDatabase(ConnectionConfig(
                     host     = postgres.host,
@@ -95,7 +97,40 @@ class ExtendedTypeIntegrationTest {
                         """.trimIndent()).execute() }
                         .then { database.run(
                             "INSERT INTO inet_test VALUES (1, '192.168.1.1'), (2, '::1')"
-                        ).execute() },
+                        ).execute() }
+                        .then { database.run("""
+                            CREATE TABLE geo_test (
+                                id  int,
+                                pt  point,
+                                bx  box,
+                                cir circle,
+                                ln  line,
+                                ls  lseg,
+                                pa  path,
+                                pg  polygon
+                            )
+                        """.trimIndent()).execute() }
+                        .then { database.run("""
+                            INSERT INTO geo_test VALUES (
+                                1,
+                                '(1.0,2.0)',
+                                '((3.0,4.0),(1.0,2.0))',
+                                '<(0.0,0.0),5.0>',
+                                '{1.0,-1.0,0.0}',
+                                '[(1.0,2.0),(3.0,4.0)]',
+                                '[(0.0,0.0),(1.0,1.0),(2.0,0.0)]',
+                                '((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0))'
+                            )
+                        """.trimIndent()).execute() }
+                        .then { database.run("CREATE EXTENSION hstore").execute() }
+                        .then { database.run("""
+                            CREATE TABLE hstore_test (id int, tags hstore)
+                        """.trimIndent()).execute() }
+                        .then { database.run("""
+                            INSERT INTO hstore_test VALUES
+                                (1, '"color"=>"red","size"=>"large"'),
+                                (2, '"color"=>"blue","size"=>NULL')
+                        """.trimIndent()).execute() },
                     context = PoolContext(pool),
                 ).completesNormally(within = 10.seconds)
                 Verify.that(pool.close()).completesNormally()
@@ -301,24 +336,147 @@ class ExtendedTypeIntegrationTest {
 
             // --- geometric types (native PG geometric, no extension required) ---
 
-            dynamicTest("point column decoded") { Assumptions.abort<Unit>("not yet implemented") },
-            dynamicTest("box column decoded")   { Assumptions.abort<Unit>("not yet implemented") },
-            dynamicTest("circle column decoded") { Assumptions.abort<Unit>("not yet implemented") },
-            dynamicTest("line column decoded")   { Assumptions.abort<Unit>("not yet implemented") },
-            dynamicTest("lseg column decoded")   { Assumptions.abort<Unit>("not yet implemented") },
-            dynamicTest("path column decoded")   { Assumptions.abort<Unit>("not yet implemented") },
-            dynamicTest("polygon column decoded") { Assumptions.abort<Unit>("not yet implemented") },
+            // --- geometric types ---
 
-            // --- hstore (requires hstore extension) ---
+            dynamicTest("point column decoded") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT pt FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgPoint>("pt") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(PgPoint(1.0, 2.0), it) }
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
 
-            dynamicTest("hstore column decoded as Map<String, String>") {
-                Assumptions.abort<Unit>("not yet implemented")
+            dynamicTest("box column decoded") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT bx FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgBox>("bx") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(PgBox(PgPoint(3.0, 4.0), PgPoint(1.0, 2.0)), it) }
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
             },
-            dynamicTest("Map<String, String> parameter encoded into hstore column") {
-                Assumptions.abort<Unit>("not yet implemented")
+
+            dynamicTest("circle column decoded") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT cir FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgCircle>("cir") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(PgCircle(PgPoint(0.0, 0.0), 5.0), it) }
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
             },
+
+            dynamicTest("line column decoded") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT ln FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgLine>("ln") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(PgLine(1.0, -1.0, 0.0), it) }
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
+            dynamicTest("lseg column decoded") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT ls FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgLseg>("ls") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(PgLseg(PgPoint(1.0, 2.0), PgPoint(3.0, 4.0)), it) }
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
+            dynamicTest("path column decoded") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT pa FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgPath>("pa") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { path ->
+                    assertEquals(false, path.closed)
+                    assertEquals(3, path.points.size)
+                    assertEquals(PgPoint(0.0, 0.0), path.points[0])
+                    assertEquals(PgPoint(1.0, 1.0), path.points[1])
+                    assertEquals(PgPoint(2.0, 0.0), path.points[2])
+                }.completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
+            dynamicTest("polygon column decoded") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT pg FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgPolygon>("pg") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { poly ->
+                    assertEquals(4, poly.points.size)
+                    assertEquals(PgPoint(0.0, 0.0), poly.points[0])
+                    assertEquals(PgPoint(1.0, 0.0), poly.points[1])
+                }.completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
+            // --- hstore ---
+
+            dynamicTest("hstore column decoded as Map<String, String?>") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT tags FROM hstore_test WHERE id = 1")
+                        .multiple().map { it.get<Map<String, String?>>("tags") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { map ->
+                    assertEquals("red",   map["color"])
+                    assertEquals("large", map["size"])
+                }.completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
+            dynamicTest("Map<String, String?> parameter encoded into hstore column") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                val tags = mapOf("env" to "prod", "region" to "eu-west")
+                Verify.that(
+                    database.run("INSERT INTO hstore_test VALUES (3, :tags)")
+                        .bind("tags" to tags).execute()
+                        .then {
+                            database.query("SELECT tags FROM hstore_test WHERE id = 3")
+                                .multiple().map { it.get<Map<String, String?>>("tags") }.take(1)
+                        },
+                    context = PoolContext(pool),
+                ).assertNext { map ->
+                    assertEquals("prod",    map["env"])
+                    assertEquals("eu-west", map["region"])
+                }.completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
             dynamicTest("hstore with null value entry round-trips") {
-                Assumptions.abort<Unit>("not yet implemented")
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT tags FROM hstore_test WHERE id = 2")
+                        .multiple().map { it.get<Map<String, String?>>("tags") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { map ->
+                    assertEquals("blue", map["color"])
+                    assertNull(map["size"])
+                }.completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
             },
 
             // --- pgvector — see pgvectorTests() below, requires pgvector/pgvector images ---

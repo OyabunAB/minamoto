@@ -22,6 +22,13 @@ import kotlinx.datetime.LocalTime
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializerOrNull
 import se.oyabun.minamoto.DatabaseException
+import se.oyabun.minamoto.postgres.PgBox
+import se.oyabun.minamoto.postgres.PgCircle
+import se.oyabun.minamoto.postgres.PgLine
+import se.oyabun.minamoto.postgres.PgLseg
+import se.oyabun.minamoto.postgres.PgPath
+import se.oyabun.minamoto.postgres.PgPoint
+import se.oyabun.minamoto.postgres.PgPolygon
 import java.math.BigDecimal
 import java.net.InetAddress
 import java.time.OffsetTime
@@ -107,6 +114,13 @@ class CodecRegistry(
         Oid.JSON        to String::class,
         Oid.JSONB       to String::class,
         Oid.INET        to InetAddress::class,
+        Oid.POINT       to PgPoint::class,
+        Oid.BOX         to PgBox::class,
+        Oid.CIRCLE      to PgCircle::class,
+        Oid.LINE        to PgLine::class,
+        Oid.LSEG        to PgLseg::class,
+        Oid.PATH        to PgPath::class,
+        Oid.POLYGON     to PgPolygon::class,
     )
 
     init {
@@ -143,6 +157,16 @@ class CodecRegistry(
     fun registerByType(codec: Codec<*>) {
         typeOnlyCodecs[codec.type] = codec
     }
+
+    /**
+     * Registers [HstoreCodec] for the `hstore` extension type (`Map<String, String?>`).
+     *
+     * The Postgres OID is assigned when the `hstore` extension is installed and
+     * is resolved lazily on the first column decode.
+     *
+     * Requires `CREATE EXTENSION hstore` in the database before use.
+     */
+    fun registerHstore() = registerByType(HstoreCodec)
 
     /**
      * Registers [PgVectorCodec] for the pgvector `vector` type ([FloatArray]).

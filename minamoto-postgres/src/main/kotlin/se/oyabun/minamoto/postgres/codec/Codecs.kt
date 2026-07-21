@@ -20,6 +20,13 @@ import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.toLocalDateTime
+import se.oyabun.minamoto.postgres.PgBox
+import se.oyabun.minamoto.postgres.PgCircle
+import se.oyabun.minamoto.postgres.PgLine
+import se.oyabun.minamoto.postgres.PgLseg
+import se.oyabun.minamoto.postgres.PgPath
+import se.oyabun.minamoto.postgres.PgPoint
+import se.oyabun.minamoto.postgres.PgPolygon
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.net.InetAddress
@@ -56,6 +63,15 @@ internal object Oid {
     const val JSONB         = 3802
     const val INET          = 869
 
+    // Geometric types
+    const val POINT         = 600
+    const val LSEG          = 601
+    const val PATH          = 602
+    const val BOX           = 603
+    const val POLYGON       = 604
+    const val LINE          = 628
+    const val CIRCLE        = 718
+
     const val BOOL_ARRAY        = 1000
     const val INT2_ARRAY        = 1005
     const val INT4_ARRAY        = 1007
@@ -77,6 +93,15 @@ internal object Oid {
     const val JSON_ARRAY        = 199
     const val JSONB_ARRAY       = 3807
     const val INET_ARRAY        = 1041
+
+    // Geometric array types
+    const val POINT_ARRAY       = 1017
+    const val LSEG_ARRAY        = 1018
+    const val PATH_ARRAY        = 1019
+    const val BOX_ARRAY         = 1020
+    const val POLYGON_ARRAY     = 1027
+    const val LINE_ARRAY        = 629
+    const val CIRCLE_ARRAY      = 719
 }
 
 /** Microseconds between Unix epoch (1970-01-01) and Postgres epoch (2000-01-01). */
@@ -391,6 +416,141 @@ internal object DurationCodec : Codec<Duration> {
     }
 }
 
+/** Binary format: 2 × float64 (x, y). */
+internal object PgPointCodec : Codec<PgPoint> {
+    override val oid             = Oid.POINT
+    override val type            = PgPoint::class
+    override val preferredFormat = FormatCode.BINARY
+
+    override fun encode(value: PgPoint): Pair<ByteArray, FormatCode> =
+        ByteBuffer.allocate(16)
+            .putDouble(value.x).putDouble(value.y)
+            .array() to FormatCode.BINARY
+
+    override fun decode(bytes: ByteArray, sourceOid: Int): PgPoint {
+        val buf = ByteBuffer.wrap(bytes)
+        return PgPoint(buf.double, buf.double)
+    }
+}
+
+/** Binary format: 4 × float64 (high.x, high.y, low.x, low.y). */
+internal object PgBoxCodec : Codec<PgBox> {
+    override val oid             = Oid.BOX
+    override val type            = PgBox::class
+    override val preferredFormat = FormatCode.BINARY
+
+    override fun encode(value: PgBox): Pair<ByteArray, FormatCode> =
+        ByteBuffer.allocate(32)
+            .putDouble(value.upperRight.x).putDouble(value.upperRight.y)
+            .putDouble(value.lowerLeft.x) .putDouble(value.lowerLeft.y)
+            .array() to FormatCode.BINARY
+
+    override fun decode(bytes: ByteArray, sourceOid: Int): PgBox {
+        val buf = ByteBuffer.wrap(bytes)
+        return PgBox(PgPoint(buf.double, buf.double), PgPoint(buf.double, buf.double))
+    }
+}
+
+/** Binary format: 3 × float64 (center.x, center.y, radius). */
+internal object PgCircleCodec : Codec<PgCircle> {
+    override val oid             = Oid.CIRCLE
+    override val type            = PgCircle::class
+    override val preferredFormat = FormatCode.BINARY
+
+    override fun encode(value: PgCircle): Pair<ByteArray, FormatCode> =
+        ByteBuffer.allocate(24)
+            .putDouble(value.center.x).putDouble(value.center.y).putDouble(value.radius)
+            .array() to FormatCode.BINARY
+
+    override fun decode(bytes: ByteArray, sourceOid: Int): PgCircle {
+        val buf = ByteBuffer.wrap(bytes)
+        return PgCircle(PgPoint(buf.double, buf.double), buf.double)
+    }
+}
+
+/** Binary format: 3 × float64 (A, B, C) — coefficients of Ax + By = C. */
+internal object PgLineCodec : Codec<PgLine> {
+    override val oid             = Oid.LINE
+    override val type            = PgLine::class
+    override val preferredFormat = FormatCode.BINARY
+
+    override fun encode(value: PgLine): Pair<ByteArray, FormatCode> =
+        ByteBuffer.allocate(24)
+            .putDouble(value.a).putDouble(value.b).putDouble(value.c)
+            .array() to FormatCode.BINARY
+
+    override fun decode(bytes: ByteArray, sourceOid: Int): PgLine {
+        val buf = ByteBuffer.wrap(bytes)
+        return PgLine(buf.double, buf.double, buf.double)
+    }
+}
+
+/** Binary format: 4 × float64 (p1.x, p1.y, p2.x, p2.y). */
+internal object PgLsegCodec : Codec<PgLseg> {
+    override val oid             = Oid.LSEG
+    override val type            = PgLseg::class
+    override val preferredFormat = FormatCode.BINARY
+
+    override fun encode(value: PgLseg): Pair<ByteArray, FormatCode> =
+        ByteBuffer.allocate(32)
+            .putDouble(value.start.x).putDouble(value.start.y)
+            .putDouble(value.end.x)  .putDouble(value.end.y)
+            .array() to FormatCode.BINARY
+
+    override fun decode(bytes: ByteArray, sourceOid: Int): PgLseg {
+        val buf = ByteBuffer.wrap(bytes)
+        return PgLseg(PgPoint(buf.double, buf.double), PgPoint(buf.double, buf.double))
+    }
+}
+
+/**
+ * Binary format: 1 byte (1 = closed, 0 = open) + int32 npts
+ * + npts × 2 × float64 (x, y per point).
+ */
+internal object PgPathCodec : Codec<PgPath> {
+    override val oid             = Oid.PATH
+    override val type            = PgPath::class
+    override val preferredFormat = FormatCode.BINARY
+
+    override fun encode(value: PgPath): Pair<ByteArray, FormatCode> {
+        val buf = ByteBuffer.allocate(5 + value.points.size * 16)
+        buf.put(if (value.closed) 1 else 0)
+        buf.putInt(value.points.size)
+        value.points.forEach { buf.putDouble(it.x); buf.putDouble(it.y) }
+        return buf.array() to FormatCode.BINARY
+    }
+
+    override fun decode(bytes: ByteArray, sourceOid: Int): PgPath {
+        val buf    = ByteBuffer.wrap(bytes)
+        val closed = buf.get() != 0.toByte()
+        val npts   = buf.int
+        return PgPath(closed, List(npts) { PgPoint(buf.double, buf.double) })
+    }
+}
+
+/**
+ * Binary format: int32 npts + npts × 2 × float64.
+ * Postgres does not include the bounding box in the binary wire format.
+ */
+internal object PgPolygonCodec : Codec<PgPolygon> {
+    override val oid             = Oid.POLYGON
+    override val type            = PgPolygon::class
+    override val preferredFormat = FormatCode.BINARY
+
+    override fun encode(value: PgPolygon): Pair<ByteArray, FormatCode> {
+        val buf = ByteBuffer.allocate(4 + value.points.size * 16)
+        buf.putInt(value.points.size)
+        value.points.forEach { buf.putDouble(it.x); buf.putDouble(it.y) }
+        return buf.array() to FormatCode.BINARY
+    }
+
+    override fun decode(bytes: ByteArray, sourceOid: Int): PgPolygon {
+        val buf  = ByteBuffer.wrap(bytes)
+        val npts = buf.int
+        return PgPolygon(List(npts) { PgPoint(buf.double, buf.double) })
+    }
+}
+
 /**
  * Binary inet wire format: 1-byte address family (2 = IPv4, 3 = IPv6), 1-byte CIDR prefix
  * length, 1-byte is_cidr flag (0 for inet), 1-byte address byte count, then the raw address.
@@ -441,4 +601,11 @@ internal val builtInCodecs: List<Codec<*>> = listOf(
     InstantCodec,
     DurationCodec,
     InetAddressCodec,
+    PgPointCodec,
+    PgBoxCodec,
+    PgCircleCodec,
+    PgLineCodec,
+    PgLsegCodec,
+    PgPathCodec,
+    PgPolygonCodec,
 )

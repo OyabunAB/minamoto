@@ -232,6 +232,40 @@ class CodecTest {
         assertEquals(value, roundtrip(codec, value))
     }
 
+    @Test fun `2D int4 array decoded as nested List`() {
+        // Hand-craft the binary wire representation of {{1,2,3},{4,5,6}}:
+        // header: ndim=2, hasNulls=0, elementOid=23, dim[0]=(2,1), dim[1]=(3,1)
+        // elements (row-major): 1,2,3,4,5,6 each as (length=4, value)
+        val buf = java.nio.ByteBuffer.allocate(7 * 4 + 6 * 8)
+        buf.putInt(2); buf.putInt(0); buf.putInt(23)
+        buf.putInt(2); buf.putInt(1)  // dim[0]
+        buf.putInt(3); buf.putInt(1)  // dim[1]
+        intArrayOf(1, 2, 3, 4, 5, 6).forEach { v -> buf.putInt(4); buf.putInt(v) }
+
+        val codec = ArrayCodec(Oid.INT4_ARRAY, Oid.INT4, IntCodec)
+        @Suppress("UNCHECKED_CAST")
+        val matrix = codec.decode(buf.array(), Oid.INT4_ARRAY) as List<List<Int>>
+
+        assertEquals(listOf(listOf(1, 2, 3), listOf(4, 5, 6)), matrix)
+    }
+
+    @Test fun `null element in 2D array throws CodecFailed`() {
+        // {{1,NULL},{3,4}} — NULL at flat index 1
+        val buf = java.nio.ByteBuffer.allocate(7 * 4 + 4 * 8 + 1 * 4)
+        buf.putInt(2); buf.putInt(0); buf.putInt(23)
+        buf.putInt(2); buf.putInt(1)
+        buf.putInt(2); buf.putInt(1)
+        buf.putInt(4); buf.putInt(1)   // element 0: value=1
+        buf.putInt(-1)                  // element 1: NULL
+        buf.putInt(4); buf.putInt(3)   // element 2: value=3
+        buf.putInt(4); buf.putInt(4)   // element 3: value=4
+
+        val codec = ArrayCodec(Oid.INT4_ARRAY, Oid.INT4, IntCodec)
+        assertFailsWith<DatabaseException.CodecFailed> {
+            codec.decode(buf.array(), Oid.INT4_ARRAY)
+        }
+    }
+
     // -------------------------------------------------------------------------
     // JSON / JSONB
     // -------------------------------------------------------------------------

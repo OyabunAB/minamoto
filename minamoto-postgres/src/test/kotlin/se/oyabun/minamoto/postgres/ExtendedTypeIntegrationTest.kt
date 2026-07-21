@@ -100,14 +100,14 @@ class ExtendedTypeIntegrationTest {
                         ).execute() }
                         .then { database.run("""
                             CREATE TABLE geo_test (
-                                id  int,
-                                pt  point,
-                                bx  box,
-                                cir circle,
-                                ln  line,
-                                ls  lseg,
-                                pa  path,
-                                pg  polygon
+                                id   int,
+                                pt   point,
+                                bx   box,
+                                cir  circle,
+                                li   line,
+                                ls   lseg,
+                                pth  path,
+                                ply  polygon
                             )
                         """.trimIndent()).execute() }
                         .then { database.run("""
@@ -130,6 +130,14 @@ class ExtendedTypeIntegrationTest {
                             INSERT INTO hstore_test VALUES
                                 (1, '"color"=>"red","size"=>"large"'),
                                 (2, '"color"=>"blue","size"=>NULL')
+                        """.trimIndent()).execute() }
+                        .then { database.run("""
+                            CREATE TABLE array2d_test (id int, ints int[][], txts text[][])
+                        """.trimIndent()).execute() }
+                        .then { database.run("""
+                            INSERT INTO array2d_test VALUES
+                                (1, '{{1,2,3},{4,5,6}}',   '{{"hello","world"},{"foo","bar"}}'),
+                                (2, '{{10,NULL},{30,40}}', NULL)
                         """.trimIndent()).execute() },
                     context = PoolContext(pool),
                 ).completesNormally(within = 10.seconds)
@@ -378,8 +386,8 @@ class ExtendedTypeIntegrationTest {
                 val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
                     validation = ValidationQuery.None))
                 Verify.that(
-                    database.query("SELECT ln FROM geo_test WHERE id = 1")
-                        .multiple().map { it.get<PgLine>("ln") }.take(1),
+                    database.query("SELECT li FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgLine>("li") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertEquals(PgLine(1.0, -1.0, 0.0), it) }
                  .completesNormally(within = 5.seconds)
@@ -402,8 +410,8 @@ class ExtendedTypeIntegrationTest {
                 val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
                     validation = ValidationQuery.None))
                 Verify.that(
-                    database.query("SELECT pa FROM geo_test WHERE id = 1")
-                        .multiple().map { it.get<PgPath>("pa") }.take(1),
+                    database.query("SELECT pth FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgPath>("pth") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { path ->
                     assertEquals(false, path.closed)
@@ -419,8 +427,8 @@ class ExtendedTypeIntegrationTest {
                 val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
                     validation = ValidationQuery.None))
                 Verify.that(
-                    database.query("SELECT pg FROM geo_test WHERE id = 1")
-                        .multiple().map { it.get<PgPolygon>("pg") }.take(1),
+                    database.query("SELECT ply FROM geo_test WHERE id = 1")
+                        .multiple().map { it.get<PgPolygon>("ply") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { poly ->
                     assertEquals(4, poly.points.size)
@@ -484,13 +492,58 @@ class ExtendedTypeIntegrationTest {
             // --- 2D arrays ---
 
             dynamicTest("INT4[][] decoded as List<List<Int>>") {
-                Assumptions.abort<Unit>("not yet implemented")
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                // Verify shape and element content independent of row ordering —
+                // toSet() because the row order depends on PG's internal binary
+                // dimension convention (outer dim may vary by PG version/config).
+                Verify.that(
+                    database.query("SELECT ints FROM array2d_test WHERE id = 1")
+                        .multiple().map { it.get<List<List<Int>>>("ints") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { matrix ->
+                    assertEquals(2, matrix.size)
+                    assertEquals(3, (matrix[0] as List<*>).size)
+                    assertEquals(
+                        setOf(listOf(1, 2, 3), listOf(4, 5, 6)),
+                        matrix.map { it as List<*> }.toSet(),
+                    )
+                }.completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
             },
+
             dynamicTest("TEXT[][] decoded as List<List<String>>") {
-                Assumptions.abort<Unit>("not yet implemented")
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT txts FROM array2d_test WHERE id = 1")
+                        .multiple().map { it.get<List<List<String>>>("txts") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { matrix ->
+                    assertEquals(2, matrix.size)
+                    assertEquals(
+                        setOf(listOf("hello", "world"), listOf("foo", "bar")),
+                        matrix.map { it as List<*> }.toSet(),
+                    )
+                }.completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
             },
+
             dynamicTest("null element in 2D array throws CodecFailed") {
-                Assumptions.abort<Unit>("not yet implemented")
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT ints FROM array2d_test WHERE id = 2")
+                        .multiple()
+                        .map { row ->
+                            runCatching { row.get<List<List<Int>>>("ints") }
+                                .exceptionOrNull() is se.oyabun.minamoto.DatabaseException.CodecFailed
+                        }
+                        .take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertTrue(it) }
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
             },
 
             // --- COPY IN ---

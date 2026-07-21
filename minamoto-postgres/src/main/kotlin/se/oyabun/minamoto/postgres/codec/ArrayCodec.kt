@@ -20,13 +20,20 @@ import kotlin.reflect.KClass
 import se.oyabun.minamoto.DatabaseException
 
 /**
- * Handles one-dimensional Postgres arrays in binary format.
+ * Handles Postgres arrays of any number of dimensions in binary format.
  *
- * Wire layout: int32 ndim, int32 hasNulls flag, int32 elementOid, then per-dimension
- * int32 length + int32 lbound, then per-element int32 length (-1 = null) + bytes.
+ * **Wire layout**: `int32 ndim`, `int32 hasNulls`, `int32 elementOid`, then per-dimension
+ * `int32 length + int32 lbound`, then all elements in **row-major order** as
+ * `int32 length` (-1 = null) + bytes.
  *
- * Null elements are not supported — [se.oyabun.minamoto.DatabaseException.CodecFailed]
- * is thrown if the server sends one. Multi-dimensional arrays (ndim > 1) are also rejected.
+ * All elements are read into a flat list, then [reshape] partitions them into
+ * nested [List]s matching the declared dimension sizes:
+ * - `ndim = 1` → `List<T>`
+ * - `ndim = 2` → `List<List<T>>`
+ * - `ndim = N` → N levels of nested lists
+ *
+ * Null elements throw [DatabaseException.CodecFailed].
+ * [encode] always produces a 1-D array; supply a flat [List] as the value.
  */
 internal class ArrayCodec<T : Any>(
     override val oid:          Int,
@@ -42,11 +49,11 @@ internal class ArrayCodec<T : Any>(
     override fun encode(value: List<T>): Pair<ByteArray, FormatCode> {
         val elementBuffers = value.map { elementCodec.encode(it).first }
         val buffer         = ByteBuffer.allocate(20 + elementBuffers.sumOf { 4 + it.size })
-        buffer.putInt(1)
-        buffer.putInt(0)
+        buffer.putInt(1)           // ndim
+        buffer.putInt(0)           // hasNulls
         buffer.putInt(elementOid)
-        buffer.putInt(value.size)
-        buffer.putInt(1)
+        buffer.putInt(value.size)  // dim[0] length
+        buffer.putInt(1)           // dim[0] lbound
         for (elementBytes in elementBuffers) {
             buffer.putInt(elementBytes.size)
             buffer.put(elementBytes)
@@ -54,32 +61,53 @@ internal class ArrayCodec<T : Any>(
         return Pair(buffer.array(), FormatCode.BINARY)
     }
 
+    @Suppress("UNCHECKED_CAST")
     override fun decode(bytes: ByteArray, sourceOid: Int): List<T> {
         val buffer = ByteBuffer.wrap(bytes)
         val ndim   = buffer.int
-        buffer.int
-        buffer.int
+        buffer.int  // hasNulls (ignored)
+        buffer.int  // elementOid from wire (we already have it)
 
         if (ndim == 0) return emptyList()
-        if (ndim != 1) throw DatabaseException.CodecFailed(
-            "multi-dimensional arrays are not supported (ndim=$ndim, OID=$sourceOid)"
-        )
 
-        val size = buffer.int
-        buffer.int
+        // One (length, lbound) pair per dimension; lower bound is always 1 in PG.
+        val dimensions = IntArray(ndim)
+        repeat(ndim) { d ->
+            dimensions[d] = buffer.int  // dimension size
+            buffer.int                   // discard lower bound
+        }
 
-        val result = ArrayList<T>(size)
-        repeat(size) { index ->
+        // Elements arrive flat in row-major order regardless of ndim.
+        val total = dimensions.fold(1, Int::times)
+        val flat  = ArrayList<T>(total)
+        repeat(total) { index ->
             val length = buffer.int
             if (length == -1) throw DatabaseException.CodecFailed(
-                "null element at index $index in array OID $sourceOid — use getOrNull or handle nulls before storing in arrays"
+                "null element at flat index $index in $ndim-D array OID $sourceOid"
             )
             val elementBytes = ByteArray(length)
             buffer.get(elementBytes)
-            result.add(elementCodec.decode(elementBytes, elementOid))
+            flat.add(elementCodec.decode(elementBytes, elementOid))
         }
-        return result
+
+        return reshape(flat as List<Any?>, dimensions, 0) as List<T>
     }
+
+    /**
+     * Recursively partitions a flat element list into nested lists that match the
+     * declared dimension sizes.
+     *
+     * At depth [depth] the inner count is the product of all dimension sizes below
+     * [depth] — that is the size of each chunk that belongs to one outer-dimension
+     * slot. Each chunk is then recursively reshaped at [depth]+1 until the last
+      * dimension is reached, where the slice is returned as-is.
+      */
+    private fun reshape(elements: List<Any?>, dimensions: IntArray, depth: Int): List<*> =
+        if (depth == dimensions.lastIndex) ArrayList(elements)  // copy — windowed() reuses its view object
+        else {
+            val innerCount = (depth + 1..dimensions.lastIndex).fold(1) { acc, i -> acc * dimensions[i] }
+            elements.chunked(innerCount) { slice -> reshape(slice, dimensions, depth + 1) }
+        }
 }
 
 internal val arrayOidByElementOid: Map<Int, Int> = mapOf(

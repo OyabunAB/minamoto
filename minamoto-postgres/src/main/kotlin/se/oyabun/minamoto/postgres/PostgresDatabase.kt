@@ -17,6 +17,7 @@ package se.oyabun.minamoto.postgres
 
 import kotlinx.coroutines.sync.Semaphore
 import se.oyabun.minamoto.Database
+import se.oyabun.minamoto.PauseBehavior
 import se.oyabun.minamoto.TransactionDefinition
 import se.oyabun.minamoto.IsolationLevel
 import se.oyabun.minamoto.TransactionMutability
@@ -56,8 +57,22 @@ class PostgresDatabase(
         )
 
     override fun query(statement: String)   = PostgresQuery(registry, statement)
-    override fun modify(statement: String) = PostgresModify(registry, statement)
-    override fun run(statement: String)  = PostgresRun(registry, statement)
+    override fun modify(statement: String)  = PostgresModify(registry, statement)
+    override fun run(statement: String)     = PostgresRun(registry, statement)
+
+    fun <T> listener(
+        channel:    se.oyabun.minamoto.NotificationChannel<T>,
+        serializer: se.oyabun.minamoto.NotificationSerializer<T>,
+        pool:       MinamotoPool,
+        behavior:   PauseBehavior = PauseBehavior.Buffer(),
+        handler:    (T) -> se.oyabun.aelv.None<Unit>,
+    ): se.oyabun.minamoto.Listener<T> = PostgresListener(channel, serializer, pool, behavior, handler)
+
+    fun <T> notifier(
+        channel:    se.oyabun.minamoto.NotificationChannel<T>,
+        serializer: se.oyabun.minamoto.NotificationSerializer<T>,
+        pool:       MinamotoPool,
+    ): se.oyabun.minamoto.Notifier<T> = PostgresNotifier(channel, serializer, pool, this)
 }
 
 /** Builds the `BEGIN` SQL statement from a [TransactionDefinition]. */

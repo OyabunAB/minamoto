@@ -40,6 +40,8 @@ sealed interface ConnectionState {
     data object InTransaction : ConnectionState
     data object Closing       : ConnectionState
     data object Closed        : ConnectionState
+
+    val isUsable: Boolean get() = this is Idle || this is Acquired || this is Executing || this is InTransaction
 }
 
 /**

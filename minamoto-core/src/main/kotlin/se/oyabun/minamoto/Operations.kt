@@ -160,7 +160,7 @@ interface BoundRun {
  * or [se.oyabun.minamoto.pool.MinamotoPool.invoke].
  */
 interface Database {
-    fun query(statement: String):   QueryBuilder
+    fun query(statement: String):  QueryBuilder
     fun modify(statement: String): ModifyBuilder
-    fun run(statement: String):  RunBuilder
+    fun run(statement: String):    RunBuilder
 }

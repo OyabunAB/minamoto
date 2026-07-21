@@ -103,6 +103,9 @@ internal class PostgresConnection(
     /** Backend key data received during handshake — used to send [CancelRequest] on a separate connection. */
     internal var backendKeyData: KeyData? = null
 
+    /** Receives [NotificationResponse] messages when this connection is in LISTEN mode. Null when not listening. */
+    internal var notificationHandler: ((BackendMessage.NotificationResponse) -> Unit)? = null
+
     /** Allocates the next unique portal name for a streaming query on this connection. */
     internal fun nextPortalName(): String = "p_${portalCounter.incrementAndGet()}"
 
@@ -126,7 +129,10 @@ internal class PostgresConnection(
                         log.connection.notice(id, message.severity, message.message)
                         return@drain
                     }
-                    is NotificationResponse -> return@drain
+                    is NotificationResponse -> {
+                        notificationHandler?.invoke(message)
+                        return@drain
+                    }
                     is ParameterStatus      -> {
                         serverParameters[message.name] = message.value
                         return@drain
@@ -202,6 +208,8 @@ internal class PostgresConnection(
         None.defer<Unit> { log.connection.closing(id) { state = ConnectionState.Closing; subscription.cancel() } }
             .then { connection.write(MessageEncoder.encode(Terminate, allocator)) }
             .then { None.defer<Unit> { connection.channel.close().sync(); log.connection.closed(id) { state = ConnectionState.Closed } } }
+
+    internal fun executeSimpleCommand(sql: String): None<Unit> = executeSimple(sql)
 
     private fun executeSimple(sql: String): None<Unit> =
         exchange(

@@ -2,108 +2,89 @@
 
 ## Vision
 
-Reactor-free PostgreSQL driver. `aelv` is the reactive runtime. No R2DBC SPI compliance
-is a goal — minamoto defines its own clean API. The driver must be production-grade:
-correct, fast, and free of leaky abstractions.
+Reactor-free PostgreSQL driver. `aelv` is the reactive runtime. The driver must be
+production-grade: correct, fast, and free of leaky abstractions. R2DBC SPI compliance
+is a goal — minamoto should be a drop-in R2DBC driver usable with Spring Data R2DBC,
+jOOQ reactive, and any other R2DBC-aware framework, while also exposing its own clean
+higher-level API directly.
 
 ---
 
 ## Status
 
 ### Done
+
 - `aelv` — `UnicastSink`, `scan`, `discard`, `Verify`, suspend overloads, all operators
 - `aelv-netty` — `NettyTransport`, `InboundHandler`, `NettyDispatchers`
 - `minamoto-core` — `Database`, `Query`, `Command`, `Effect`, `Batch`, `Row`, `RowMetadata`,
-  `ColumnMetadata`, `ColumnType`, `Nullability`, `MinamotoException`, connection SPI
+  `ColumnMetadata`, `ColumnType`, `Nullability`, `MinamotoException`, connection SPI,
+  `PauseBehavior`, `NotificationChannel`, `NotificationSerializer`, `Listener`, `Notifier`
 - `minamoto-pool` — `MinamotoPool`, `PoolConfig`, eviction, hooks, deadlock detection,
-  full test suite (17 tests)
-- `minamoto-postgres` — PGwire encoder/decoder/framer, SCRAM-SHA-256/MD5/trust,
-  extended query protocol, `PgConnection`, `PgConnectionFactory`, 30 tests passing
+  full test suite
+- `minamoto-postgres` — PGwire encoder/decoder/framer, SCRAM-SHA-256/MD5/SCRAM-PLUS/trust,
+  extended query protocol, named portals, named prepared statement cache (LRU),
+  true backpressure streaming (Execute+Flush+Close), `PostgresDatabase`, `PostgresConnection`
+- **Phase 1 — Codec layer** — `Codec<T>`, `CodecRegistry` (OID+type lookup, numeric widening,
+  type-only lazy binding, `Any` dispatch, `String` fallback, supertype encode fallback),
+  `CodecRegistrar` SPI; built-in scalar codecs (bool, int2/4/8, float4/8, numeric, text,
+  bytea, uuid, date, time, timetz, timestamp, timestamptz, interval); array codecs for all
+  scalar types; N-dimensional arrays via flat read + recursive reshape; JSON/JSONB via
+  kotlinx.serialization; `registerJson`, `registerJsonb`, `registerEnum`, `registerVector`,
+  `registerHstore`, `registerByType`
+- **Phase 1 — Extended types** — `InetAddressCodec` (inet/inet[]), geometric types
+  (`PgPoint`, `PgBox`, `PgCircle`, `PgLine`, `PgLseg`, `PgPath`, `PgPolygon`) with array
+  codecs, `HstoreCodec` (`Map<String,String?>`, binary + text fallback),
+  `PgVectorCodec` (`FloatArray`, binary + text fallback), `DynamicArrayCodec` for
+  user-defined type arrays (enum[], lazy element OID resolution)
+- **Phase 2 — Transaction API** — `BEGIN`/`COMMIT`/`ROLLBACK`, `TransactionDefinition`
+  (isolation, read-only, deferrable), savepoints, `Database.transaction {}`,
+  `TransactionStatus` from `ReadyForQuery`
+- **Phase 3 — Statement & Result SPI** — named parameters (`:name` rewriting), `fetchSize`,
+  `RETURNING`, named prepared statement cache (LRU, per-connection), named portals,
+  `Flush` between pipeline stages, concurrent statement tests
+- **Phase 4 — LISTEN/NOTIFY** — `PostgresListener` (dedicated connection, exponential
+  back-off reconnect, JVM shutdown hook), `PostgresNotifier`, `PauseBehavior.Buffer`
+  (client-side queue, configurable `maxSize`/`overflow`) and `PauseBehavior.Discard`,
+  `database.listener()` / `database.notifier()`
+- **Phase 5 — Protocol completeness** — TLS (`SslMode` DISABLE→VERIFY_FULL),
+  SCRAM-SHA-256-PLUS (channel binding), `CancelRequest`, typed `ConnectionConfig` session
+  params, `ParameterStatus` updates, `NoticeResponse`, SQLSTATE → `MinamotoException` subtypes
+- **Phase 6 — Connection management** — credential rotation supplier, multi-host PRIMARY
+  strategy, `acquiredConnections()` on `ManagedPool`
 
 ---
 
 ## Roadmap
 
-Items are ordered by dependency. Each phase must be complete and tested before the next begins.
+---
+
+### COPY FROM STDIN  *(next)*
+
+Bulk insert via the PGwire `COPY` protocol, binary format.
+
+- New wire messages: `CopyInResponse`, `CopyData`, `CopyDone`, `CopyFail`
+- Binary COPY format: file header, per-row header, column values as binary codec output,
+  file trailer
+- `database.copyIn(table, columns, registry)` → returns a sink/stream that accepts rows
+  and flushes `CopyData` frames
+- `CommandComplete` tag parsed for inserted row count
+- Error path: `CopyFail` sent on pipeline cancellation or upstream error
 
 ---
 
-### Phase 1 — Codec layer  *(next)*
+### R2DBC SPI compliance
 
-**Why it's first:** `Row.get<T>()` and `Command`/`Query` parameter binding both need codecs.
-Nothing above this layer is usable without it.
+Adapter layer that implements `io.r2dbc.spi.*` on top of minamoto's existing internals.
+`aelv` publishers bridge to `org.reactivestreams.Publisher` via the existing `asFlow()`
+path; the protocol and pool machinery are unchanged.
 
-**Scope (TBD via interview):**
-- `Codec<T>` interface — encode (Kotlin value → `ByteArray`, format code) + decode (`ByteArray?`, OID → T)
-- `CodecRegistry` — lookup by OID + Kotlin type; pluggable
-- Built-in codecs: boolean, int2/4/8, float4/8, numeric/BigDecimal, text/varchar,
-  bytea, uuid, date, time, timetz, timestamp, timestamptz, interval, json, jsonb, hstore (map)
-- Array codecs for all scalar types above
-- Binary format negotiation in `Bind` (format codes per parameter, per result column)
-- `Row` implementation backed by `ColumnDescription` + codec dispatch
-- Parameter encoding: `Any` → `ByteArray?` + format code via registry
-- Custom codec registrar for user-defined types (enums, pgvector, domain types)
-
-**Open questions (interview):**
-- Binary vs text format per codec — default to binary for everything, or text for safety?
-- How should the codec registry resolve ambiguity (same OID, multiple Kotlin types)?
-- Should `Row.get<T>()` accept a reified type parameter or a `KClass<T>` argument?
-- Null semantics — sentinel, exception, or `getOrNull` always required for nullable?
-- Where does the codec live — `minamoto-core`, `minamoto-postgres`, or a new module?
-- Do we want a `json`/`jsonb` abstraction or raw `ByteArray` + caller-side parsing?
-
----
-
-### Phase 2 — Transaction API
-
-- `PgConnection.beginTransaction()` / `commitTransaction()` / `rollbackTransaction()`
-- `setAutoCommit(boolean)`
-- `TransactionDefinition` (isolation level, read-only, deferrable) sent in `BEGIN`
-- Savepoints: `createSavepoint(name)` / `releaseSavepoint(name)` / `rollbackToSavepoint(name)`
-- `Database.transaction {}` implementation wired to real `BEGIN`/`COMMIT`/`ROLLBACK`
-- `TransactionStatus` from `ReadyForQuery` exposed on `PgConnection`
-
----
-
-### Phase 3 — Statement & Result SPI
-
-- `Statement` builder: `bind(index, value)`, `bind(name, value)`, `bindNull`, `add()` batch, `fetchSize`
-- `Result` — typed `rows(): Many<Row>`, `rowsUpdated(): One<Long>`
-- `RowMetadata` wired from live `RowDescription`
-- `RETURNING` support in `Command`
-- Named prepared statement cache (server-side, keyed by SQL hash)
-- Named portals (required for concurrent statements per connection)
-- `Flush` message between pipeline stages
-
----
-
-### Phase 4 — LISTEN/NOTIFY
-
-- Surface `NotificationResponse` as `Many<Notification>` on `PgConnection`
-- `LISTEN`/`UNLISTEN` helpers
-- Idle-connection notification poll (no-op `Sync` to drain notifications on a parked connection)
-
----
-
-### Phase 5 — Protocol completeness
-
-- TLS: `SSLMode` (DISABLE / ALLOW / PREFER / REQUIRE / VERIFY_CA / VERIFY_FULL)
-- SCRAM-SHA-256-PLUS (channel binding)
-- `CancelRequest` — actually send it on coroutine cancellation
-- Session params in `StartupMessage` (search_path, timezone, lock_wait_timeout, options map)
-- `applicationName` configurable
-- `ParameterStatus` updates surfaced to callers
-- `NoticeResponse` surfaced with configurable log level
-- SQLSTATE → `MinamotoException` subtype mapping
-
----
-
-### Phase 6 — Connection management
-
-- Credential supplier (`() -> String` for rotation)
-- Multi-host / fail-over (`PRIMARY` / `SECONDARY` / `ANY` strategy)
-- TCP tuning (`tcpNoDelay`, `tcpKeepAlive`)
-- Unix domain socket transport
+- `MinamotoConnectionFactory` implements `ConnectionFactory`
+- `MinamotoConnection` implements `Connection` — wraps `PostgresConnection`
+- `MinamotoStatement` implements `Statement` — delegates to `PostgresQuery`/`PostgresModify`
+- `MinamotoResult` implements `Result` — adapts `Many<Row>` and `rowsUpdated`
+- `MinamotoRow` / `MinamotoRowMetadata` implement `Row` / `RowMetadata`
+- `META-INF/services/io.r2dbc.spi.ConnectionFactoryProvider` for auto-discovery
+- R2DBC TCK passing
 
 ---
 
@@ -112,6 +93,14 @@ Nothing above this layer is usable without it.
 - Replication connection mode
 - Logical / physical replication slots
 - WAL streaming + keepalive/feedback protocol
+
+---
+
+### Remaining extended type coverage
+
+- `COPY FROM STDIN with binary stream inserts rows` — see above
+- Geometric encode round-trips (all 7 types, currently decode-only tests)
+- `hstore` null-value encode parameter test
 
 ---
 

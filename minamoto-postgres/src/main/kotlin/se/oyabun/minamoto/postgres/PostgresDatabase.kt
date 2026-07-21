@@ -16,6 +16,7 @@
 package se.oyabun.minamoto.postgres
 
 import kotlinx.coroutines.sync.Semaphore
+import se.oyabun.aelv.None
 import se.oyabun.minamoto.Database
 import se.oyabun.minamoto.PauseBehavior
 import se.oyabun.minamoto.TransactionDefinition
@@ -43,6 +44,10 @@ class PostgresDatabase(
 
     private val connectionBudget = Semaphore(maxConnections)
 
+    // One factory — and therefore one NettyTransport/EventLoopGroup — shared by all
+    // pools created from this database instance.
+    private val connectionFactory = PostgresConnectionFactory(config, registry)
+
     /**
      * Creates a [MinamotoPool] backed by this database.
      *
@@ -52,9 +57,11 @@ class PostgresDatabase(
     fun pool(poolConfig: PoolConfig = PoolConfig()): MinamotoPool =
         MinamotoPool(
             config           = poolConfig,
-            factory          = PostgresConnectionFactory(config, registry),
+            factory          = connectionFactory,
             connectionBudget = connectionBudget,
         )
+
+    fun close(): None<Unit> = connectionFactory.close()
 
     override fun query(statement: String)   = PostgresQuery(registry, statement)
     override fun modify(statement: String)  = PostgresModify(registry, statement)

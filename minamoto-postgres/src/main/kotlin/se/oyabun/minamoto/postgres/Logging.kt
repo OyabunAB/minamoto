@@ -41,7 +41,6 @@ internal class Log(private val slf4j: Slf4jLogger) {
         fun <T> closing(id: ConnectionId, action: () -> T): T       { slf4j.debug { "connection closing [$id]" };  return action() }
         fun error(id: ConnectionId, cause: Throwable)                = slf4j.error(cause) { "connection error [$id]" }
         fun invalidState(id: ConnectionId, text: String)             = slf4j.warn { "invalid state [$id]: $text" }
-        /** Server notice — severity is the PG-reported level (NOTICE, WARNING, etc.). */
         fun notice(id: ConnectionId, severity: String, message: String) =
             slf4j.warn { "server notice [$id] $severity: $message" }
     }
@@ -50,13 +49,14 @@ internal class Log(private val slf4j: Slf4jLogger) {
         fun handshakeStarted(id: ConnectionId)                       = slf4j.debug { "handshake started [$id]" }
         fun handshakeComplete(id: ConnectionId)                      = slf4j.debug { "handshake complete [$id]" }
         fun <T> authRequired(id: ConnectionId, type: String, action: () -> T): T { slf4j.debug { "auth required [$id]: $type" }; return action() }
-        fun messageReceived(id: ConnectionId, type: String)          = slf4j.trace { "← [$id] $type" }
-        fun messageSent(id: ConnectionId, type: String)              = slf4j.trace { "→ [$id] $type" }
+        fun messageReceived(id: ConnectionId, detail: String)        = slf4j.trace { "← [$id] $detail" }
+        fun messageSent(id: ConnectionId, detail: String)            = slf4j.trace { "→ [$id] $detail" }
+        fun parameterStatus(id: ConnectionId, name: String, value: String) =
+            slf4j.trace { "← [$id] ParameterStatus $name=$value" }
         fun queryStarted(id: ConnectionId, sql: String)              = slf4j.debug { "query [$id]: ${sql.take(120)}" }
-        fun rowReceived(id: ConnectionId)                            = slf4j.trace { "row [$id]" }
         fun queryComplete(id: ConnectionId)                          = slf4j.debug { "query complete [$id]" }
         fun conversationQueued(id: ConnectionId, size: Int)          = slf4j.trace { "conversation queued [$id] queue=$size" }
-        fun conversationComplete(id: ConnectionId)                   = slf4j.trace { "conversation complete [$id]" }
+        fun conversationComplete(id: ConnectionId, remaining: Int)   = slf4j.trace { "conversation complete [$id] queue=$remaining" }
         fun noConversation(id: ConnectionId, text: String)           = slf4j.warn { "no active conversation [$id]: $text" }
     }
 
@@ -67,9 +67,8 @@ internal class Log(private val slf4j: Slf4jLogger) {
     }
 
     inner class Query {
-        fun usingTransactionConnection(id: ConnectionId) = slf4j.trace { "using transaction connection [$id]" }
-        fun acquiringConnection()                         = slf4j.trace { "no active transaction — acquiring connection" }
-        fun reusingConnection(id: ConnectionId)           = slf4j.trace { "reusing active connection [$id]" }
+        fun acquiredFromPool(id: ConnectionId)            = slf4j.trace { "acquired from pool [$id]" }
+        fun reusingTransactionConnection(id: ConnectionId) = slf4j.trace { "reusing transaction connection [$id]" }
     }
 }
 

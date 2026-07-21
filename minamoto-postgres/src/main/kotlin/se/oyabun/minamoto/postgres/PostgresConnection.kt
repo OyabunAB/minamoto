@@ -29,10 +29,10 @@ import se.oyabun.aelv.firstMaybe
 import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.fold
-import se.oyabun.aelv.getOrThrow
+import se.oyabun.aelv.rightOrThrow
 import se.oyabun.aelv.map
 import se.oyabun.aelv.or
-import se.oyabun.aelv.then
+import se.oyabun.aelv.andThen
 import se.oyabun.aelv.netty.ChannelBinding
 import se.oyabun.aelv.netty.NettyConnection
 import se.oyabun.aelv.netty.NettyTransport
@@ -123,7 +123,12 @@ internal class PostgresConnection(
                 } finally {
                     buf.release()
                 }
-                log.protocol.messageReceived(id, message::class.simpleName ?: "Unknown")
+                log.protocol.messageReceived(id, when (message) {
+                    is BackendMessage.ReadyForQuery  -> "ReadyForQuery tx=${message.transactionStatus::class.simpleName}"
+                    is BackendMessage.CommandComplete -> "CommandComplete ${message.tag}"
+                    is BackendMessage.DataRow         -> "DataRow cols=${message.values.size}"
+                    else                              -> message::class.simpleName ?: "Unknown"
+                })
                 when (message) {
                     is NoticeResponse       -> {
                         log.connection.notice(id, message.severity, message.message)
@@ -135,6 +140,7 @@ internal class PostgresConnection(
                     }
                     is ParameterStatus      -> {
                         serverParameters[message.name] = message.value
+                        log.protocol.parameterStatus(id, message.name, message.value)
                         return@drain
                     }
                     else                    -> { /* route to active conversation */ }
@@ -152,7 +158,7 @@ internal class PostgresConnection(
 
                 if (conversation.takeUntil(message)) {
                     conversations.poll()
-                    log.protocol.conversationComplete(id)
+                    log.protocol.conversationComplete(id, conversations.size)
                     conversation.sink.complete()
                 }
             },
@@ -188,7 +194,11 @@ internal class PostgresConnection(
             conversations.add(conversation)
             log.protocol.conversationQueued(id, conversations.size)
             messages.forEach { msg ->
-                log.protocol.messageSent(id, msg::class.simpleName ?: "Unknown")
+                log.protocol.messageSent(id, when (msg) {
+                    is FrontendMessage.Parse    -> "Parse ${msg.statementName.ifEmpty { "<unnamed>" }} ${msg.statement.take(80)}"
+                    is FrontendMessage.Execute  -> "Execute maxRows=${msg.maxRows}"
+                    else                        -> msg::class.simpleName ?: "Unknown"
+                })
                 connection.write(MessageEncoder.encode(msg, allocator)).await()
             }
         }
@@ -206,8 +216,8 @@ internal class PostgresConnection(
 
     override fun close(): None<Unit> =
         None.defer<Unit> { log.connection.closing(id) { state = ConnectionState.Closing; subscription.cancel() } }
-            .then { connection.write(MessageEncoder.encode(Terminate, allocator)) }
-            .then { None.defer<Unit> { connection.channel.close().sync(); log.connection.closed(id) { state = ConnectionState.Closed } } }
+            .andThen { connection.write(MessageEncoder.encode(Terminate, allocator)) }
+            .andThen { None.defer<Unit> { connection.channel.close().sync(); log.connection.closed(id) { state = ConnectionState.Closed } } }
 
     internal fun executeSimpleCommand(sql: String): None<Unit> = executeSimple(sql)
 
@@ -215,19 +225,19 @@ internal class PostgresConnection(
         exchange(
             messages  = listOf(Parse("", sql), Bind("", "", emptyList<Parameter>()), Execute("", 0), Sync),
             takeUntil = { it is ReadyForQuery },
-        ).discard().then { None.complete<Unit>() }
+        ).discard().andThen { None.complete<Unit>() }
 
     override fun begin(definition: TransactionDefinition): None<Unit> =
         executeSimple(definition.toBeginSql())
-            .then { None.defer<Unit> { state = ConnectionState.InTransaction } }
+            .andThen { None.defer<Unit> { state = ConnectionState.InTransaction } }
 
     override fun commit(): None<Unit> =
         executeSimple("COMMIT")
-            .then { None.defer<Unit> { state = ConnectionState.Idle } }
+            .andThen { None.defer<Unit> { state = ConnectionState.Idle } }
 
     override fun rollback(): None<Unit> =
         executeSimple("ROLLBACK")
-            .then { None.defer<Unit> { state = ConnectionState.Idle } }
+            .andThen { None.defer<Unit> { state = ConnectionState.Idle } }
 
     override fun savepoint(id: SavepointId): None<Unit> = executeSimple("SAVEPOINT ${id.value}")
     override fun releaseSavepoint(id: SavepointId): None<Unit> = executeSimple("RELEASE SAVEPOINT ${id.value}")
@@ -263,12 +273,12 @@ internal class PostgresConnection(
         return transport.connect(address.hostString, address.port)
             .flatMapNone { cancelConnection ->
                 cancelConnection.write(MessageEncoder.encode(CancelRequest(keyData.processId, keyData.secretKey), allocator))
-                    .then { None.defer<Unit> { cancelConnection.channel.close().sync() } }
+                    .andThen { None.defer<Unit> { cancelConnection.channel.close().sync() } }
             }
             .recover {
                 None.defer { log.connection.invalidState(id, "cancel request failed — server may have already completed the query") }
             }
-            .then { None.complete<Unit>() }
+            .andThen { None.complete<Unit>() }
     }
 }
 
@@ -395,6 +405,8 @@ class PostgresConnectionFactory(
 
     override fun destroy(connection: Connection): None<Unit> =
         connection.close()
+
+    fun close(): None<Unit> = transport.close().discard()
 }
 
 /**
@@ -410,7 +422,7 @@ private fun negotiateSsl(connection: NettyConnection, host: String, sslMode: Ssl
     val allocator = connection.channel.alloc()
     val buf = allocator.buffer(8).also { it.writeInt(8); it.writeInt(80877103) }
     return connection.write(buf)
-        .then { One.defer { connection.readRawByte() } }
+        .andThen { One.defer { connection.readRawByte() } }
         .flatMap { response ->
             when {
                 response == 'S'.code.toByte() ->

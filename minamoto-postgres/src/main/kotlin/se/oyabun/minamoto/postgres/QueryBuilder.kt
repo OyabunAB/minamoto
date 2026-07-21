@@ -149,7 +149,7 @@ private fun resolveSlot(pool: ManagedPool): One<Pair<PostgresConnection, Managed
             is AcquireResult.TimedOut          -> One.error(DatabaseException.AcquireTimeout(pool.config.acquireTimeout))
             is AcquireResult.DeadlockPrevented -> One.error(DatabaseException.DeadlockDetected(result.held, result.poolSize))
         }
-    }.doOnNext { (conn: PostgresConnection, _: ManagedPool?) -> log.query.reusingConnection(conn.id) }
+    }.doOnNext { (conn: PostgresConnection, _: ManagedPool?) -> log.query.acquiredFromPool(conn.id) }
 
 private fun withConnection(
     @Suppress("UNUSED_PARAMETER") registry: CodecRegistry,
@@ -159,14 +159,13 @@ private fun withConnection(
     val connectionContext = context[ConnectionContext]
     val activeId          = connectionContext?.activeConnectionId()
     if (activeId != null) {
-        log.query.reusingConnection(activeId)
+        log.query.reusingTransactionConnection(activeId)
         val pool = context[PoolContext]?.pool as? ManagedPool
             ?: return@defer Many.error(DatabaseException.InvalidState("connection active in context but no ManagedPool found"))
         val connection = pool.connectionFor(activeId) as? PostgresConnection
             ?: return@defer Many.error(DatabaseException.InvalidState("active connection ${activeId.value} not found in pool"))
         block(connection)
     } else {
-        log.query.acquiringConnection()
         val pool = context[PoolContext]?.pool as? ManagedPool
             ?: return@defer Many.error(DatabaseException.InvalidState("no pool in context — use pool { } or pool.transactionally { }"))
         Many.resource(
@@ -185,14 +184,13 @@ private fun withConnectionOne(
     val connectionContext = context[ConnectionContext]
     val activeId          = connectionContext?.activeConnectionId()
     if (activeId != null) {
-        log.query.reusingConnection(activeId)
+        log.query.reusingTransactionConnection(activeId)
         val pool = context[PoolContext]?.pool as? ManagedPool
             ?: return@defer Many.error(DatabaseException.InvalidState("connection active in context but no ManagedPool found"))
         val connection = pool.connectionFor(activeId) as? PostgresConnection
             ?: return@defer Many.error(DatabaseException.InvalidState("active connection ${activeId.value} not found in pool"))
         block(connection).toMany()
     } else {
-        log.query.acquiringConnection()
         val pool = context[PoolContext]?.pool as? ManagedPool
             ?: return@defer Many.error(DatabaseException.InvalidState("no pool in context — use pool { } or pool.transactionally { }"))
         One.resource(
@@ -211,14 +209,13 @@ private fun withConnectionNone(
     val connectionContext = context[ConnectionContext]
     val activeId          = connectionContext?.activeConnectionId()
     if (activeId != null) {
-        log.query.reusingConnection(activeId)
+        log.query.reusingTransactionConnection(activeId)
         val pool = context[PoolContext]?.pool as? ManagedPool
             ?: return@defer Many.error(DatabaseException.InvalidState("connection active in context but no ManagedPool found"))
         val connection = pool.connectionFor(activeId) as? PostgresConnection
             ?: return@defer Many.error(DatabaseException.InvalidState("active connection ${activeId.value} not found in pool"))
         block(connection).toMany()
     } else {
-        log.query.acquiringConnection()
         val pool = context[PoolContext]?.pool as? ManagedPool
             ?: return@defer Many.error(DatabaseException.InvalidState("no pool in context — use pool { } or pool.transactionally { }"))
         None.resource(

@@ -4,8 +4,8 @@
             <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
-    <logger name="se.oyabun.aelv.netty" level="TRACE"/>
-    <logger name="se.oyabun.minamoto.postgres" level="TRACE"/>
+    <logger name="se.oyabun.aelv.netty" level="DEBUG"/>
+    <logger name="se.oyabun.minamoto.postgres" level="DEBUG"/>
     <logger name="se.oyabun.aelv" level="DEBUG"/>
     <root level="WARN">
         <appender-ref ref="STDOUT"/>

@@ -16,9 +16,11 @@ import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
 import se.oyabun.minamoto.postgres.codec.CodecRegistry
+import se.oyabun.minamoto.postgres.codec.PgVectorCodec
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -41,6 +43,12 @@ class ExtendedTypeIntegrationTest {
             "postgres:15-alpine",
             "postgres:17-alpine",
             "postgres:18beta2-alpine",
+        )
+
+        // Official pgvector images ship the vector extension pre-installed.
+        val pgvectorImages = listOf(
+            "pgvector/pgvector:pg15",
+            "pgvector/pgvector:pg17",
         )
     }
 
@@ -313,17 +321,7 @@ class ExtendedTypeIntegrationTest {
                 Assumptions.abort<Unit>("not yet implemented")
             },
 
-            // --- pgvector (requires vector extension) ---
-
-            dynamicTest("vector column decoded as FloatArray") {
-                Assumptions.abort<Unit>("not yet implemented")
-            },
-            dynamicTest("FloatArray parameter encoded into vector column") {
-                Assumptions.abort<Unit>("not yet implemented")
-            },
-            dynamicTest("cosine distance query returns correct ordering") {
-                Assumptions.abort<Unit>("not yet implemented")
-            },
+            // --- pgvector — see pgvectorTests() below, requires pgvector/pgvector images ---
 
             // --- 2D arrays ---
 
@@ -344,6 +342,116 @@ class ExtendedTypeIntegrationTest {
             },
             dynamicTest("COPY row count matches inserted data") {
                 Assumptions.abort<Unit>("not yet implemented")
+            },
+
+            dynamicTest("stop container") { postgres.stop() },
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // pgvector — separate factory, uses pgvector/pgvector images
+    // -------------------------------------------------------------------------
+
+    @TestFactory
+    fun `pgvector type tests`() = pgvectorImages.map { image ->
+        val postgres = PostgreSQLContainer(
+            DockerImageName.parse(image).asCompatibleSubstituteFor("postgres")
+        ).withDatabaseName("testdb").withUsername("testuser").withPassword("testpass")
+        dynamicContainer(image, pgvectorTests(postgres))
+    }
+
+    private fun pgvectorTests(postgres: PostgreSQLContainer): List<DynamicNode> {
+        lateinit var database: PostgresDatabase
+
+        return listOf(
+
+            dynamicTest("start container") {
+                postgres.start()
+                val registry = CodecRegistry(discoverRegistrars = false).also { it.registerVector() }
+                database = PostgresDatabase(ConnectionConfig(
+                    host     = postgres.host,
+                    port     = postgres.firstMappedPort,
+                    user     = postgres.username,
+                    password = { postgres.password },
+                    database = postgres.databaseName,
+                ), registry = registry)
+            },
+
+            dynamicTest("setup DDL") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.run("CREATE EXTENSION vector").execute()
+                        .then { database.run("""
+                            CREATE TABLE vec_test (
+                                id        int,
+                                embedding vector(3)
+                            )
+                        """.trimIndent()).execute() }
+                        .then { database.run("""
+                            INSERT INTO vec_test VALUES
+                                (1, '[1.0, 0.0, 0.0]'),
+                                (2, '[0.8, 0.2, 0.0]'),
+                                (3, '[0.0, 0.0, 1.0]')
+                        """.trimIndent()).execute() },
+                    context = PoolContext(pool),
+                ).completesNormally(within = 10.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
+            dynamicTest("vector column decoded as FloatArray") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT embedding FROM vec_test WHERE id = 1")
+                        .multiple()
+                        .map { it.get<FloatArray>("embedding") }
+                        .take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertContentEquals(floatArrayOf(1.0f, 0.0f, 0.0f), it) }
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
+            dynamicTest("FloatArray parameter encoded into vector column") {
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                val vec = floatArrayOf(0.1f, 0.2f, 0.3f)
+                Verify.that(
+                    database.run("INSERT INTO vec_test VALUES (4, :vec)")
+                        .bind("vec" to vec).execute()
+                        .then {
+                            database.query("SELECT embedding FROM vec_test WHERE id = 4")
+                                .multiple()
+                                .map { it.get<FloatArray>("embedding") }
+                                .take(1)
+                        },
+                    context = PoolContext(pool),
+                ).assertNext { assertContentEquals(vec, it) }
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
+            },
+
+            dynamicTest("cosine distance query returns correct ordering") {
+                // Vectors: [1,0,0] (id=1), [0.8,0.2,0] (id=2), [0,0,1] (id=3)
+                // Query: nearest to [1,0,0] by cosine distance
+                // Expected order: 1 (distance 0), 2 (distance ~0.11), 3 (distance 1)
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("""
+                        SELECT id
+                        FROM vec_test
+                        WHERE id IN (1, 2, 3)
+                        ORDER BY embedding <=> '[1,0,0]'::vector
+                    """.trimIndent())
+                        .multiple()
+                        .map { it.get<Int>("id") }
+                        .take(3),
+                    context = PoolContext(pool),
+                ).emitsNext(1, 2, 3)
+                 .completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
             },
 
             dynamicTest("stop container") { postgres.stop() },

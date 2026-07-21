@@ -145,6 +145,16 @@ class CodecRegistry(
     }
 
     /**
+     * Registers [PgVectorCodec] for the pgvector `vector` type ([FloatArray]).
+     *
+     * The Postgres OID is assigned when the `vector` extension is installed and
+     * is resolved lazily on the first column decode.
+     *
+     * Requires `CREATE EXTENSION vector` in the database before use.
+     */
+    fun registerVector() = registerByType(PgVectorCodec)
+
+    /**
      * Registers [T] for the json OID (114) using the [Json] instance held by this registry.
      * Fails at call time if [T] has no kotlinx.serialization serializer.
      */

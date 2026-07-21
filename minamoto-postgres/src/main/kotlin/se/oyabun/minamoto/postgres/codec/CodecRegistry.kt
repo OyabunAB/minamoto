@@ -194,9 +194,15 @@ class CodecRegistry(
      * Installs a text-based codec for [E] that maps enum constant [names][Enum.name]
      * to Postgres enum labels and back via [enumValueOf].
      *
-     * The Postgres OID is resolved lazily on first decode. The Postgres enum label must
-     * match the Kotlin constant name exactly (case-sensitive). If your Postgres labels
-     * differ in case from your Kotlin constants, provide a custom codec via [registerByType].
+     * Also installs a [DynamicArrayCodec] for `List<E>` so that `E[]` columns decode
+     * without knowing the array OID at registration time.
+     *
+     * Both the scalar type OID and its array OID are resolved lazily on the first
+     * decode. The Postgres enum label must match the Kotlin constant name exactly
+     * (case-sensitive). If your Postgres labels differ in case, provide a custom
+     * codec via [registerByType]. See [DynamicArrayCodec] for the multi-enum-type
+     * edge case when two different enum array columns appear before either OID
+     * is bound.
      */
     inline fun <reified E : Enum<E>> registerEnum() {
         registerByType(object : Codec<E> {
@@ -210,7 +216,14 @@ class CodecRegistry(
             override fun decode(bytes: ByteArray, sourceOid: Int): E =
                 enumValueOf(bytes.toString(Charsets.UTF_8))
         })
+        registerDynamicArray(E::class)
     }
+
+    /** Registers a [DynamicArrayCodec] for [elementType]; split out of [registerEnum] because
+     *  public inline functions cannot directly reference internal constructors. */
+    @PublishedApi
+    internal fun <E : Any> registerDynamicArray(elementType: KClass<E>) =
+        registerByType(DynamicArrayCodec(elementType, this))
 
     @Suppress("UNCHECKED_CAST")
     fun <T : Any> registerJson(type: KClass<T>) {

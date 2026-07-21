@@ -93,6 +93,12 @@ class ExtendedTypeIntegrationTest {
                             "INSERT INTO mood_test VALUES (1, 'happy'), (2, 'sad'), (3, 'neutral')"
                         ).execute() }
                         .then { database.run("""
+                            CREATE TABLE mood_array_test (id int, moods mood[])
+                        """.trimIndent()).execute() }
+                        .then { database.run(
+                            "INSERT INTO mood_array_test VALUES (1, ARRAY['happy','sad','neutral']::mood[])"
+                        ).execute() }
+                        .then { database.run("""
                             CREATE TABLE inet_test (id int, address inet)
                         """.trimIndent()).execute() }
                         .then { database.run(
@@ -339,7 +345,17 @@ class ExtendedTypeIntegrationTest {
             // --- enum array ---
 
             dynamicTest("ENUM[] decoded as List<Mood>") {
-                Assumptions.abort<Unit>("not yet implemented")
+                val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
+                    validation = ValidationQuery.None))
+                Verify.that(
+                    database.query("SELECT moods FROM mood_array_test WHERE id = 1")
+                        .multiple().map { it.get<List<Mood>>("moods") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { list ->
+                    assertEquals(3, list.size)
+                    assertEquals(setOf(Mood.happy, Mood.sad, Mood.neutral), (list as List<*>).toSet())
+                }.completesNormally(within = 5.seconds)
+                Verify.that(pool.close()).completesNormally()
             },
 
             // --- geometric types (native PG geometric, no extension required) ---

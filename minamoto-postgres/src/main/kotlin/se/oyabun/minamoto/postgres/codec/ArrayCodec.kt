@@ -26,7 +26,7 @@ import se.oyabun.minamoto.DatabaseException
  * `int32 length + int32 lbound`, then all elements in **row-major order** as
  * `int32 length` (-1 = null) + bytes.
  *
- * All elements are read into a flat list, then [reshape] partitions them into
+ * All elements are read into a flat list, then [reshapeFlat] partitions them into
  * nested [List]s matching the declared dimension sizes:
  * - `ndim = 1` → `List<T>`
  * - `ndim = 2` → `List<List<T>>`
@@ -90,25 +90,119 @@ internal class ArrayCodec<T : Any>(
             flat.add(elementCodec.decode(elementBytes, elementOid))
         }
 
-        return reshape(flat as List<Any?>, dimensions, 0) as List<T>
+        return reshapeFlat(flat as List<Any?>, dimensions, 0) as List<T>
+    }
+}
+
+/**
+ * Handles Postgres arrays of user-defined types (enums, domains, composite types)
+ * whose element OID is not known until the first [decode] call.
+ *
+ * The [elementOid] is read from the binary array header at decode time and used to
+ * look up the element codec in [registry] via [CodecRegistry.find]. This lazy lookup
+ * also lazily binds the element codec under the real OID for O(1) future access.
+ *
+ * **First-query text fallback**: on the first query the array OID has not yet been
+ * bound, so [CodecRegistry.preferredFormat] returns TEXT. The decoder detects the
+ * leading `{` character and parses the PG text array representation instead.
+ *
+ * **Multiple user-defined array types**: if more than one element type is registered,
+ * only the most recently registered codec occupies the type-only slot for `List`.
+ * The first query for any given array OID binds the correct codec via the binary
+ * header's `elementOid`; subsequent queries are O(1). The only risk is the first
+ * query in TEXT format when two different array types are both unbound — in that
+ * case the wrong element codec may be selected and will fail loudly with
+ * [DatabaseException.CodecFailed] rather than silently producing wrong values.
+ *
+ * [encode] produces a PG text array `{label1,label2,...}` so that PG can infer
+ * the target array type from the column/parameter context.
+ */
+internal class DynamicArrayCodec<T : Any>(
+    private val elementType: KClass<T>,
+    private val registry:    CodecRegistry,
+) : Codec<List<T>> {
+
+    override val oid             = 0    // resolved lazily
+    @Suppress("UNCHECKED_CAST")
+    override val type: KClass<List<T>> = List::class as KClass<List<T>>
+    override val preferredFormat = FormatCode.BINARY
+
+    override fun encode(value: List<T>): Pair<ByteArray, FormatCode> {
+        if (value.isEmpty()) return "{}".toByteArray(Charsets.UTF_8) to FormatCode.TEXT
+        val labels = value.joinToString(",") { element ->
+            registry.findForEncoding(element).encode(element).first.toString(Charsets.UTF_8)
+        }
+        return "{$labels}".toByteArray(Charsets.UTF_8) to FormatCode.TEXT
     }
 
-    /**
-     * Recursively partitions a flat element list into nested lists that match the
-     * declared dimension sizes.
-     *
-     * At depth [depth] the inner count is the product of all dimension sizes below
-     * [depth] — that is the size of each chunk that belongs to one outer-dimension
-     * slot. Each chunk is then recursively reshaped at [depth]+1 until the last
-      * dimension is reached, where the slice is returned as-is.
-      */
-    private fun reshape(elements: List<Any?>, dimensions: IntArray, depth: Int): List<*> =
-        if (depth == dimensions.lastIndex) ArrayList(elements)  // copy — windowed() reuses its view object
-        else {
-            val innerCount = (depth + 1..dimensions.lastIndex).fold(1) { acc, i -> acc * dimensions[i] }
-            elements.chunked(innerCount) { slice -> reshape(slice, dimensions, depth + 1) }
+    @Suppress("UNCHECKED_CAST")
+    override fun decode(bytes: ByteArray, sourceOid: Int): List<T> =
+        if (bytes.isNotEmpty() && bytes[0] == '{'.code.toByte()) decodeText(bytes)
+        else                                                       decodeBinary(bytes, sourceOid)
+
+    private fun decodeText(bytes: ByteArray): List<T> {
+        val text = bytes.toString(Charsets.UTF_8).trim()
+        if (text == "{}" || text.isEmpty()) return emptyList()
+        val content = text.removePrefix("{").removeSuffix("}")
+        // Use OID 0 as a sentinel — type-only lookup resolves the element codec.
+        val elementCodec = registry.find(0, elementType)
+        return content.split(",").map { label ->
+            elementCodec.decode(label.trim().toByteArray(Charsets.UTF_8), 0)
         }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun decodeBinary(bytes: ByteArray, sourceOid: Int): List<T> {
+        val buffer     = ByteBuffer.wrap(bytes)
+        val ndim       = buffer.int
+        buffer.int     // hasNulls (ignored)
+        val elementOid = buffer.int
+
+        if (ndim == 0) return emptyList()
+
+        // Look up (and lazily bind) the element codec using the actual wire OID.
+        val elementCodec = registry.find(elementOid, elementType)
+
+        val dimensions = IntArray(ndim)
+        repeat(ndim) { d ->
+            dimensions[d] = buffer.int
+            buffer.int   // discard lower bound
+        }
+
+        val total = dimensions.fold(1, Int::times)
+        val flat  = ArrayList<T>(total)
+        repeat(total) { index ->
+            val length = buffer.int
+            if (length == -1) throw DatabaseException.CodecFailed(
+                "null element at flat index $index in $ndim-D array OID $sourceOid"
+            )
+            val elementBytes = ByteArray(length)
+            buffer.get(elementBytes)
+            flat.add(elementCodec.decode(elementBytes, elementOid))
+        }
+
+        return reshapeFlat(flat as List<Any?>, dimensions, 0) as List<T>
+    }
 }
+
+/**
+ * Recursively partitions a flat element list into nested lists matching the
+ * declared [dimensions].
+ *
+ * At depth [depth] the inner count is the product of all dimension sizes below
+ * [depth]. Each chunk is recursively reshaped at [depth]+1 until the last
+ * dimension is reached.
+ *
+ * **Important**: returns `ArrayList(elements)` at the base case — not `elements`
+ * directly. Kotlin's `windowed()` reuses a single view object for `RandomAccess`
+ * lists; returning the view would cause all outer slots to alias the same reference.
+ */
+internal fun reshapeFlat(elements: List<Any?>, dimensions: IntArray, depth: Int): List<*> =
+    if (depth == dimensions.lastIndex) ArrayList(elements)
+    else {
+        val innerCount = (depth + 1..dimensions.lastIndex).fold(1) { acc, i -> acc * dimensions[i] }
+        elements.chunked(innerCount) { slice -> reshapeFlat(slice, dimensions, depth + 1) }
+    }
 
 internal val arrayOidByElementOid: Map<Int, Int> = mapOf(
     Oid.BOOL        to Oid.BOOL_ARRAY,

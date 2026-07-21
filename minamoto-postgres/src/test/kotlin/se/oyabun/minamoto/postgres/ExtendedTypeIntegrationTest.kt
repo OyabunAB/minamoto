@@ -1,5 +1,6 @@
 package se.oyabun.minamoto.postgres
 
+import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.DynamicContainer.dynamicContainer
 import org.junit.jupiter.api.DynamicNode
 import org.junit.jupiter.api.DynamicTest.dynamicTest
@@ -282,6 +283,67 @@ class ExtendedTypeIntegrationTest {
                 ).assertNext { assertIs<InetAddress>(it); assertEquals("192.168.1.1", (it as InetAddress).hostAddress) }
                  .completesNormally(within = 5.seconds)
                 Verify.that(pool.close()).completesNormally()
+            },
+
+            // --- enum array ---
+
+            dynamicTest("ENUM[] decoded as List<Mood>") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+
+            // --- geometric types (native PG geometric, no extension required) ---
+
+            dynamicTest("point column decoded") { Assumptions.abort<Unit>("not yet implemented") },
+            dynamicTest("box column decoded")   { Assumptions.abort<Unit>("not yet implemented") },
+            dynamicTest("circle column decoded") { Assumptions.abort<Unit>("not yet implemented") },
+            dynamicTest("line column decoded")   { Assumptions.abort<Unit>("not yet implemented") },
+            dynamicTest("lseg column decoded")   { Assumptions.abort<Unit>("not yet implemented") },
+            dynamicTest("path column decoded")   { Assumptions.abort<Unit>("not yet implemented") },
+            dynamicTest("polygon column decoded") { Assumptions.abort<Unit>("not yet implemented") },
+
+            // --- hstore (requires hstore extension) ---
+
+            dynamicTest("hstore column decoded as Map<String, String>") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+            dynamicTest("Map<String, String> parameter encoded into hstore column") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+            dynamicTest("hstore with null value entry round-trips") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+
+            // --- pgvector (requires vector extension) ---
+
+            dynamicTest("vector column decoded as FloatArray") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+            dynamicTest("FloatArray parameter encoded into vector column") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+            dynamicTest("cosine distance query returns correct ordering") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+
+            // --- 2D arrays ---
+
+            dynamicTest("INT4[][] decoded as List<List<Int>>") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+            dynamicTest("TEXT[][] decoded as List<List<String>>") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+            dynamicTest("null element in 2D array throws CodecFailed") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+
+            // --- COPY IN ---
+
+            dynamicTest("COPY FROM STDIN with binary stream inserts rows") {
+                Assumptions.abort<Unit>("not yet implemented")
+            },
+            dynamicTest("COPY row count matches inserted data") {
+                Assumptions.abort<Unit>("not yet implemented")
             },
 
             dynamicTest("stop container") { postgres.stop() },

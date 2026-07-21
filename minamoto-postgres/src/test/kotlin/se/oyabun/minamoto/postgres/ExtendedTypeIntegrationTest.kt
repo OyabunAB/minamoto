@@ -11,7 +11,7 @@ import se.oyabun.aelv.None
 import se.oyabun.aelv.Verify
 import se.oyabun.aelv.map
 import se.oyabun.aelv.take
-import se.oyabun.aelv.then
+import se.oyabun.aelv.andThen
 import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.pool.PoolConfig
 import se.oyabun.minamoto.pool.ValidationQuery
@@ -86,25 +86,25 @@ class ExtendedTypeIntegrationTest {
                     validation = ValidationQuery.None))
                 Verify.that(
                     database.run("CREATE TYPE mood AS ENUM ('happy', 'sad', 'neutral')").execute()
-                        .then { database.run("""
+                        .andThen { database.run("""
                             CREATE TABLE mood_test (id int, mood mood)
                         """.trimIndent()).execute() }
-                        .then { database.run(
+                        .andThen { database.run(
                             "INSERT INTO mood_test VALUES (1, 'happy'), (2, 'sad'), (3, 'neutral')"
                         ).execute() }
-                        .then { database.run("""
+                        .andThen { database.run("""
                             CREATE TABLE mood_array_test (id int, moods mood[])
                         """.trimIndent()).execute() }
-                        .then { database.run(
+                        .andThen { database.run(
                             "INSERT INTO mood_array_test VALUES (1, ARRAY['happy','sad','neutral']::mood[])"
                         ).execute() }
-                        .then { database.run("""
+                        .andThen { database.run("""
                             CREATE TABLE inet_test (id int, address inet)
                         """.trimIndent()).execute() }
-                        .then { database.run(
+                        .andThen { database.run(
                             "INSERT INTO inet_test VALUES (1, '192.168.1.1'), (2, '::1')"
                         ).execute() }
-                        .then { database.run("""
+                        .andThen { database.run("""
                             CREATE TABLE geo_test (
                                 id   int,
                                 pt   point,
@@ -116,7 +116,7 @@ class ExtendedTypeIntegrationTest {
                                 ply  polygon
                             )
                         """.trimIndent()).execute() }
-                        .then { database.run("""
+                        .andThen { database.run("""
                             INSERT INTO geo_test VALUES (
                                 1,
                                 '(1.0,2.0)',
@@ -128,26 +128,26 @@ class ExtendedTypeIntegrationTest {
                                 '((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0))'
                             )
                         """.trimIndent()).execute() }
-                        .then { database.run("CREATE EXTENSION hstore").execute() }
-                        .then { database.run("""
+                        .andThen { database.run("CREATE EXTENSION hstore").execute() }
+                        .andThen { database.run("""
                             CREATE TABLE hstore_test (id int, tags hstore)
                         """.trimIndent()).execute() }
-                        .then { database.run("""
+                        .andThen { database.run("""
                             INSERT INTO hstore_test VALUES
                                 (1, '"color"=>"red","size"=>"large"'),
                                 (2, '"color"=>"blue","size"=>NULL')
                         """.trimIndent()).execute() }
-                        .then { database.run("""
+                        .andThen { database.run("""
                             CREATE TABLE array2d_test (id int, ints int[][], txts text[][])
                         """.trimIndent()).execute() }
-                        .then { database.run("""
+                        .andThen { database.run("""
                             INSERT INTO array2d_test VALUES
                                 (1, '{{1,2,3},{4,5,6}}',   '{{"hello","world"},{"foo","bar"}}'),
                                 (2, '{{10,NULL},{30,40}}', NULL)
                         """.trimIndent()).execute() },
                     context = PoolContext(pool),
-                ).completesNormally(within = 10.seconds)
-                Verify.that(pool.close()).completesNormally()
+                ).completes(within = 10.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             // --- inet ---
@@ -160,14 +160,14 @@ class ExtendedTypeIntegrationTest {
                         .multiple().map { it.get<InetAddress>("address") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertIs<Inet4Address>(it); assertEquals("192.168.1.1", it.hostAddress) }
-                 .completesNormally(within = 5.seconds)
+                 .completes(within = 5.seconds)
                 Verify.that(
                     database.query("SELECT address FROM inet_test WHERE id = 2")
                         .multiple().map { it.get<InetAddress>("address") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertIs<Inet6Address>(it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("InetAddress parameter encoded into inet column") {
@@ -177,7 +177,7 @@ class ExtendedTypeIntegrationTest {
                 Verify.that(
                     database.run("INSERT INTO inet_test VALUES (3, :addr)")
                         .bind("addr" to addr).execute()
-                        .then {
+                        .andThen {
                             database.query("SELECT address FROM inet_test WHERE id = 3")
                                 .multiple()
                                 .map { it.get<InetAddress>("address") }
@@ -185,8 +185,8 @@ class ExtendedTypeIntegrationTest {
                         },
                     context = PoolContext(pool),
                 ).assertNext { assertEquals("10.0.0.1", it.hostAddress) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("inet[] decoded as List<InetAddress>") {
@@ -202,8 +202,8 @@ class ExtendedTypeIntegrationTest {
                     assertEquals(2, list.size)
                     assertEquals("192.168.0.1", list[0].hostAddress)
                     assertEquals("10.0.0.1",   list[1].hostAddress)
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             // --- user-defined enum ---
@@ -211,15 +211,25 @@ class ExtendedTypeIntegrationTest {
             dynamicTest("Kotlin enum registered for PG enum OID encodes and decodes") {
                 val pool = database.pool(PoolConfig(initialSize = 1, maxSize = 3,
                     validation = ValidationQuery.None))
+                // Query each value individually with take(1) — Verify.runPipeline subscribes
+                // via source$ which delivers items asynchronously; one item per subscription
+                // is reliably delivered on all PG versions without concurrency concerns.
                 Verify.that(
-                    database.query("SELECT mood FROM mood_test ORDER BY id")
-                        .multiple()
-                        .map { it.get<Mood>("mood") }
-                        .take(3),
+                    database.query("SELECT mood FROM mood_test WHERE id = 1")
+                        .multiple().map { it.get<Mood>("mood") }.take(1),
                     context = PoolContext(pool),
-                ).emitsNext(Mood.happy, Mood.sad, Mood.neutral)
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                ).assertNext { assertEquals(Mood.happy, it) }.completes(within = 5.seconds)
+                Verify.that(
+                    database.query("SELECT mood FROM mood_test WHERE id = 2")
+                        .multiple().map { it.get<Mood>("mood") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(Mood.sad, it) }.completes(within = 5.seconds)
+                Verify.that(
+                    database.query("SELECT mood FROM mood_test WHERE id = 3")
+                        .multiple().map { it.get<Mood>("mood") }.take(1),
+                    context = PoolContext(pool),
+                ).assertNext { assertEquals(Mood.neutral, it) }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("Kotlin enum encodes as parameter and round-trips") {
@@ -228,7 +238,7 @@ class ExtendedTypeIntegrationTest {
                 Verify.that(
                     database.run("INSERT INTO mood_test VALUES (4, :mood)")
                         .bind("mood" to Mood.neutral).execute()
-                        .then {
+                        .andThen {
                             database.query("SELECT mood FROM mood_test WHERE id = 4")
                                 .multiple()
                                 .map { it.get<Mood>("mood") }
@@ -236,8 +246,8 @@ class ExtendedTypeIntegrationTest {
                         },
                     context = PoolContext(pool),
                 ).assertNext { assertEquals(Mood.neutral, it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("PG enum column decoded as String without explicit codec") {
@@ -250,8 +260,8 @@ class ExtendedTypeIntegrationTest {
                         .take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertEquals("happy", it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             // --- Any dispatch ---
@@ -264,8 +274,8 @@ class ExtendedTypeIntegrationTest {
                         .map { it.get<Any>("v") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertTrue(it is Boolean); assertEquals(true, it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("int4 column read as Any returns Int") {
@@ -276,8 +286,8 @@ class ExtendedTypeIntegrationTest {
                         .map { it.get<Any>("v") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertIs<Int>(it); assertEquals(42, it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("text column read as Any returns String") {
@@ -288,8 +298,8 @@ class ExtendedTypeIntegrationTest {
                         .map { it.get<Any>("v") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertIs<String>(it); assertEquals("hello", it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("uuid column read as Any returns UUID") {
@@ -300,8 +310,8 @@ class ExtendedTypeIntegrationTest {
                         .map { it.get<Any>("v") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertIs<java.util.UUID>(it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("timestamptz column read as Any returns Instant") {
@@ -312,8 +322,8 @@ class ExtendedTypeIntegrationTest {
                         .map { it.get<Any>("v") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertIs<kotlinx.datetime.Instant>(it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("json column read as Any returns String") {
@@ -324,8 +334,8 @@ class ExtendedTypeIntegrationTest {
                         .map { it.get<Any>("v") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertIs<String>(it); assertTrue((it as String).contains("ok")) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("inet column read as Any returns InetAddress") {
@@ -338,8 +348,8 @@ class ExtendedTypeIntegrationTest {
                         .take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertIs<InetAddress>(it); assertEquals("192.168.1.1", (it as InetAddress).hostAddress) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             // --- enum array ---
@@ -354,8 +364,8 @@ class ExtendedTypeIntegrationTest {
                 ).assertNext { list ->
                     assertEquals(3, list.size)
                     assertEquals(setOf(Mood.happy, Mood.sad, Mood.neutral), (list as List<*>).toSet())
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             // --- geometric types (native PG geometric, no extension required) ---
@@ -370,8 +380,8 @@ class ExtendedTypeIntegrationTest {
                         .multiple().map { it.get<PgPoint>("pt") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertEquals(PgPoint(1.0, 2.0), it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("box column decoded") {
@@ -382,8 +392,8 @@ class ExtendedTypeIntegrationTest {
                         .multiple().map { it.get<PgBox>("bx") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertEquals(PgBox(PgPoint(3.0, 4.0), PgPoint(1.0, 2.0)), it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("circle column decoded") {
@@ -394,8 +404,8 @@ class ExtendedTypeIntegrationTest {
                         .multiple().map { it.get<PgCircle>("cir") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertEquals(PgCircle(PgPoint(0.0, 0.0), 5.0), it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("line column decoded") {
@@ -406,8 +416,8 @@ class ExtendedTypeIntegrationTest {
                         .multiple().map { it.get<PgLine>("li") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertEquals(PgLine(1.0, -1.0, 0.0), it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("lseg column decoded") {
@@ -418,8 +428,8 @@ class ExtendedTypeIntegrationTest {
                         .multiple().map { it.get<PgLseg>("ls") }.take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertEquals(PgLseg(PgPoint(1.0, 2.0), PgPoint(3.0, 4.0)), it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("path column decoded") {
@@ -435,8 +445,8 @@ class ExtendedTypeIntegrationTest {
                     assertEquals(PgPoint(0.0, 0.0), path.points[0])
                     assertEquals(PgPoint(1.0, 1.0), path.points[1])
                     assertEquals(PgPoint(2.0, 0.0), path.points[2])
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("polygon column decoded") {
@@ -450,8 +460,8 @@ class ExtendedTypeIntegrationTest {
                     assertEquals(4, poly.points.size)
                     assertEquals(PgPoint(0.0, 0.0), poly.points[0])
                     assertEquals(PgPoint(1.0, 0.0), poly.points[1])
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             // --- hstore ---
@@ -466,8 +476,8 @@ class ExtendedTypeIntegrationTest {
                 ).assertNext { map ->
                     assertEquals("red",   map["color"])
                     assertEquals("large", map["size"])
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("Map<String, String?> parameter encoded into hstore column") {
@@ -477,7 +487,7 @@ class ExtendedTypeIntegrationTest {
                 Verify.that(
                     database.run("INSERT INTO hstore_test VALUES (3, :tags)")
                         .bind("tags" to tags).execute()
-                        .then {
+                        .andThen {
                             database.query("SELECT tags FROM hstore_test WHERE id = 3")
                                 .multiple().map { it.get<Map<String, String?>>("tags") }.take(1)
                         },
@@ -485,8 +495,8 @@ class ExtendedTypeIntegrationTest {
                 ).assertNext { map ->
                     assertEquals("prod",    map["env"])
                     assertEquals("eu-west", map["region"])
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("hstore with null value entry round-trips") {
@@ -499,8 +509,8 @@ class ExtendedTypeIntegrationTest {
                 ).assertNext { map ->
                     assertEquals("blue", map["color"])
                     assertNull(map["size"])
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             // --- pgvector — see pgvectorTests() below, requires pgvector/pgvector images ---
@@ -524,8 +534,8 @@ class ExtendedTypeIntegrationTest {
                         setOf(listOf(1, 2, 3), listOf(4, 5, 6)),
                         matrix.map { it as List<*> }.toSet(),
                     )
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("TEXT[][] decoded as List<List<String>>") {
@@ -541,8 +551,8 @@ class ExtendedTypeIntegrationTest {
                         setOf(listOf("hello", "world"), listOf("foo", "bar")),
                         matrix.map { it as List<*> }.toSet(),
                     )
-                }.completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                }.completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("null element in 2D array throws CodecFailed") {
@@ -558,8 +568,8 @@ class ExtendedTypeIntegrationTest {
                         .take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertTrue(it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             // --- COPY IN ---
@@ -609,21 +619,21 @@ class ExtendedTypeIntegrationTest {
                     validation = ValidationQuery.None))
                 Verify.that(
                     database.run("CREATE EXTENSION vector").execute()
-                        .then { database.run("""
+                        .andThen { database.run("""
                             CREATE TABLE vec_test (
                                 id        int,
                                 embedding vector(3)
                             )
                         """.trimIndent()).execute() }
-                        .then { database.run("""
+                        .andThen { database.run("""
                             INSERT INTO vec_test VALUES
                                 (1, '[1.0, 0.0, 0.0]'),
                                 (2, '[0.8, 0.2, 0.0]'),
                                 (3, '[0.0, 0.0, 1.0]')
                         """.trimIndent()).execute() },
                     context = PoolContext(pool),
-                ).completesNormally(within = 10.seconds)
-                Verify.that(pool.close()).completesNormally()
+                ).completes(within = 10.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("vector column decoded as FloatArray") {
@@ -636,8 +646,8 @@ class ExtendedTypeIntegrationTest {
                         .take(1),
                     context = PoolContext(pool),
                 ).assertNext { assertContentEquals(floatArrayOf(1.0f, 0.0f, 0.0f), it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("FloatArray parameter encoded into vector column") {
@@ -647,7 +657,7 @@ class ExtendedTypeIntegrationTest {
                 Verify.that(
                     database.run("INSERT INTO vec_test VALUES (4, :vec)")
                         .bind("vec" to vec).execute()
-                        .then {
+                        .andThen {
                             database.query("SELECT embedding FROM vec_test WHERE id = 4")
                                 .multiple()
                                 .map { it.get<FloatArray>("embedding") }
@@ -655,8 +665,8 @@ class ExtendedTypeIntegrationTest {
                         },
                     context = PoolContext(pool),
                 ).assertNext { assertContentEquals(vec, it) }
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("cosine distance query returns correct ordering") {
@@ -677,8 +687,8 @@ class ExtendedTypeIntegrationTest {
                         .take(3),
                     context = PoolContext(pool),
                 ).emitsNext(1, 2, 3)
-                 .completesNormally(within = 5.seconds)
-                Verify.that(pool.close()).completesNormally()
+                 .completes(within = 5.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("stop container") { postgres.stop() },

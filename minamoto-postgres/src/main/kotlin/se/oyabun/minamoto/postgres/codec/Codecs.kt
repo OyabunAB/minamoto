@@ -22,6 +22,7 @@ import kotlinx.datetime.LocalTime
 import kotlinx.datetime.toLocalDateTime
 import java.math.BigDecimal
 import java.math.BigInteger
+import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.time.OffsetTime
 import java.time.ZoneOffset
@@ -53,6 +54,7 @@ internal object Oid {
     const val UUID          = 2950
     const val JSON          = 114
     const val JSONB         = 3802
+    const val INET          = 869
 
     const val BOOL_ARRAY        = 1000
     const val INT2_ARRAY        = 1005
@@ -74,6 +76,7 @@ internal object Oid {
     const val BYTEA_ARRAY       = 1001
     const val JSON_ARRAY        = 199
     const val JSONB_ARRAY       = 3807
+    const val INET_ARRAY        = 1041
 }
 
 /** Microseconds between Unix epoch (1970-01-01) and Postgres epoch (2000-01-01). */
@@ -388,6 +391,38 @@ internal object DurationCodec : Codec<Duration> {
     }
 }
 
+/**
+ * Binary inet wire format: 1-byte address family (2 = IPv4, 3 = IPv6), 1-byte CIDR prefix
+ * length, 1-byte is_cidr flag (0 for inet), 1-byte address byte count, then the raw address.
+ * Encodes host addresses (/32 for IPv4, /128 for IPv6); CIDR prefix bits on decode are ignored.
+ */
+internal object InetAddressCodec : Codec<InetAddress> {
+    override val oid             = Oid.INET
+    override val type            = InetAddress::class
+    override val preferredFormat = FormatCode.BINARY
+
+    private const val AF_INET4: Byte = 2
+    private const val AF_INET6: Byte = 3
+
+    override fun encode(value: InetAddress): Pair<ByteArray, FormatCode> {
+        val addr   = value.address
+        val family = if (addr.size == 4) AF_INET4 else AF_INET6
+        val result = ByteArray(4 + addr.size)
+        result[0] = family
+        result[1] = (addr.size * 8).toByte()  // full host prefix (/32 or /128)
+        result[2] = 0                          // is_cidr = false
+        result[3] = addr.size.toByte()
+        addr.copyInto(result, 4)
+        return result to FormatCode.BINARY
+    }
+
+    override fun decode(bytes: ByteArray, sourceOid: Int): InetAddress {
+        val nb   = bytes[3].toInt() and 0xFF
+        val addr = bytes.copyOfRange(4, 4 + nb)
+        return InetAddress.getByAddress(addr)
+    }
+}
+
 internal val builtInCodecs: List<Codec<*>> = listOf(
     BooleanCodec,
     ShortCodec,
@@ -405,4 +440,5 @@ internal val builtInCodecs: List<Codec<*>> = listOf(
     LocalDateTimeCodec,
     InstantCodec,
     DurationCodec,
+    InetAddressCodec,
 )

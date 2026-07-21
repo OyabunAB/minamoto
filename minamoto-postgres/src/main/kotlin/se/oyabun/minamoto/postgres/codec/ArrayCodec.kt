@@ -26,7 +26,7 @@ import se.oyabun.minamoto.DatabaseException
  * int32 length + int32 lbound, then per-element int32 length (-1 = null) + bytes.
  *
  * Null elements are not supported — [se.oyabun.minamoto.DatabaseException.CodecFailed]
- * is thrown if the server sends one. Multi-dimensional arrays are rejected by checking ndim.
+ * is thrown if the server sends one. Multi-dimensional arrays (ndim > 1) are also rejected.
  */
 internal class ArrayCodec<T : Any>(
     override val oid:          Int,
@@ -61,6 +61,9 @@ internal class ArrayCodec<T : Any>(
         buffer.int
 
         if (ndim == 0) return emptyList()
+        if (ndim != 1) throw DatabaseException.CodecFailed(
+            "multi-dimensional arrays are not supported (ndim=$ndim, OID=$sourceOid)"
+        )
 
         val size = buffer.int
         buffer.int
@@ -100,4 +103,5 @@ internal val arrayOidByElementOid: Map<Int, Int> = mapOf(
     Oid.BYTEA       to Oid.BYTEA_ARRAY,
     Oid.JSON        to Oid.JSON_ARRAY,
     Oid.JSONB       to Oid.JSONB_ARRAY,
+    Oid.INET        to Oid.INET_ARRAY,
 )

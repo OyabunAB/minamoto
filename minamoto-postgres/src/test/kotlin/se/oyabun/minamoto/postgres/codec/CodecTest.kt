@@ -299,7 +299,7 @@ class CodecTest {
     @Test fun `registry throws CodecFailed for unknown OID and type`() {
         val registry = CodecRegistry()
         assertFailsWith<DatabaseException.CodecFailed> {
-            registry.find(99999, String::class)
+            registry.find(99999, Int::class)     // no codec for Int at a non-existent OID
         }
     }
 

@@ -25,7 +25,7 @@ import se.oyabun.aelv.flatMapNone
 import se.oyabun.aelv.fold
 import se.oyabun.aelv.map
 import se.oyabun.aelv.or
-import se.oyabun.aelv.then
+import se.oyabun.aelv.andThen
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.postgres.Logging
 import se.oyabun.minamoto.postgres.PostgresConnection
@@ -92,7 +92,7 @@ internal fun PostgresConnection.handshake(
             is ErrorResponse                    -> None.error<BackendMessage>(DatabaseException.AuthenticationFailed(authMessage.message))
             else -> None.error<BackendMessage>(DatabaseException.InvalidState("unexpected message during auth: $authMessage"))
         }
-        .then {
+        .andThen {
             exchange(emptyList(), { it is ReadyForQuery })
                 .fold(emptyList<KeyData>()) { acc: List<KeyData>, message: BackendMessage ->
                     when (message) {

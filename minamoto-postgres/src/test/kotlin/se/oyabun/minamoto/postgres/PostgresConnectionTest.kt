@@ -57,7 +57,7 @@ class PostgresConnectionTest {
                 Verify.that(
                     database.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(pool),
-                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(1, it) }.completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("query streams multiple rows") {
@@ -66,7 +66,7 @@ class PostgresConnectionTest {
                         .multiple()
                         .fold(emptyList<String>()) { acc, row -> acc + row.get<String>("greeting") },
                     context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf("hello", "world"), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf("hello", "world"), it) }.completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("pool validates connection with SELECT 1") {
@@ -84,8 +84,8 @@ class PostgresConnectionTest {
                 Verify.that(
                     dbWithValidation.query("SELECT 42 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(validatingPool),
-                ).assertNext { assertEquals(42, it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(validatingPool.close()).completesNormally()
+                ).assertNext { assertEquals(42, it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(validatingPool.close()).completes()
             },
 
             dynamicTest("bad credentials fail to connect") {
@@ -107,12 +107,12 @@ class PostgresConnectionTest {
                 Verify.that(
                     badDatabase.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(badPool),
-                ).failed(within = 15.seconds)
-                Verify.that(badPool.close()).completesNormally()
+                ).fails(within = 15.seconds)
+                Verify.that(badPool.close()).completes()
             },
 
             dynamicTest("stop container") {
-                Verify.that(pool.close()).completesNormally()
+                Verify.that(pool.close()).completes()
                 postgres.stop()
             },
         )

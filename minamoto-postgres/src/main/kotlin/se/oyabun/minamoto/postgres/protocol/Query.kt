@@ -23,7 +23,7 @@ import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.fold
 import se.oyabun.aelv.resource
-import se.oyabun.aelv.then
+import se.oyabun.aelv.andThen
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.Row
 import se.oyabun.minamoto.postgres.Column
@@ -94,13 +94,13 @@ internal fun PostgresConnection.executeQuery(
                         when (message) {
                             is DataRow         -> Many.items(buildRow(message, descriptions))
                             is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions, ::closingSync)
-                            is CommandComplete -> closingSync().then { Many.empty<Row>() }
+                            is CommandComplete -> closingSync().andThen { Many.empty<Row>() }
                             is ErrorResponse   -> {
                                 if (message.sqlState == INVALID_PREPARED_STATEMENT) {
                                     statementCache.evict(statement)
-                                    closingSync().then { executeQuery(statement, parameters, fetchSize) }
+                                    closingSync().andThen { executeQuery(statement, parameters, fetchSize) }
                                 } else {
-                                    closingSync().then { Many.error<Row>(message.asException()) }
+                                    closingSync().andThen { Many.error<Row>(message.asException()) }
                                 }
                             }
                             else               -> Many.empty()
@@ -206,8 +206,8 @@ private fun PostgresConnection.fetchMore(
     when (message) {
         is DataRow         -> Many.items(buildRow(message, descriptions))
         is PortalSuspended -> fetchMore(portalName, fetchSize, descriptions, closingSync)
-        is CommandComplete -> closingSync().then { Many.empty<Row>() }
-        is ErrorResponse   -> closingSync().then { Many.error<Row>(message.asException()) }
+        is CommandComplete -> closingSync().andThen { Many.empty<Row>() }
+        is ErrorResponse   -> closingSync().andThen { Many.error<Row>(message.asException()) }
         else               -> Many.empty()
     }
 }

@@ -18,7 +18,7 @@ import se.oyabun.aelv.map
 import se.oyabun.aelv.merge
 import se.oyabun.aelv.resource
 import se.oyabun.aelv.subscribeOn
-import se.oyabun.aelv.then
+import se.oyabun.aelv.andThen
 import se.oyabun.minamoto.postgres.HostSelectionStrategy
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
@@ -74,8 +74,8 @@ class ConnectionManagementIntegrationTest {
                 ).assertNext { searchPath ->
                     assertTrue(searchPath.contains("myschema"),
                         "expected search_path to contain myschema but was: $searchPath")
-                }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
 
             dynamicTest("timezone set in StartupMessage is active on connect") {
@@ -91,8 +91,8 @@ class ConnectionManagementIntegrationTest {
                     acquireTimeout = 5.seconds, createTimeout = 10.seconds, validation = ValidationQuery.None))
                 Verify.that(
                     database.query("SHOW timezone").single().map { it.get<String>("TimeZone") }, context = PoolContext(p),
-                ).assertNext { assertEquals("UTC", it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { assertEquals("UTC", it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
 
             dynamicTest("applicationName appears in pg_stat_activity") {
@@ -110,8 +110,8 @@ class ConnectionManagementIntegrationTest {
                     database.query(
                         "SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()"
                     ).single().map { it.get<String>("application_name") }, context = PoolContext(p),
-                ).assertNext { assertEquals("test-app", it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { assertEquals("test-app", it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
 
             // --- ParameterStatus (verified via SHOW, not internal fields) ---
@@ -130,8 +130,8 @@ class ConnectionManagementIntegrationTest {
                     database.query("SHOW server_version").single().map { it.get<String>("server_version") }, context = PoolContext(p),
                 ).assertNext { version ->
                     assertTrue(version.isNotEmpty(), "server_version was empty")
-                }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
 
             dynamicTest("SET timezone reflected in subsequent query") {
@@ -147,11 +147,11 @@ class ConnectionManagementIntegrationTest {
                     acquireTimeout = 5.seconds, createTimeout = 10.seconds, validation = ValidationQuery.None))
                 Verify.that(
                     database.modify("SET timezone = 'America/New_York'").count().toMany(), context = PoolContext(p),
-                ).completesNormally(within = TEST_TIMEOUT)
+                ).completes(within = TEST_TIMEOUT)
                 Verify.that(
                     database.query("SHOW timezone").single().map { it.get<String>("TimeZone") }, context = PoolContext(p),
-                ).assertNext { assertEquals("America/New_York", it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { assertEquals("America/New_York", it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
 
             // --- Deferred/Phase 6 stubs ---
@@ -182,7 +182,7 @@ class ConnectionManagementIntegrationTest {
                 ).assertNext {
                     assertEquals(1, it)
                     assertTrue(callCount.get() > 0, "password supplier was never called")
-                }.completesNormally(within = 5.seconds)
+                }.completes(within = 5.seconds)
             },
             dynamicTest("PRIMARY target connects to writable node") {
                 org.junit.jupiter.api.Assumptions.assumeTrue(false, "Phase 6 — tested separately in multiHostTests")
@@ -201,11 +201,11 @@ class ConnectionManagementIntegrationTest {
                 val cancelAfterDelay = Many.items(Unit)
                     .delaySubscription(300.milliseconds)
                     .flatMapNone { p.acquiredConnections().first().cancel() }
-                    .then { Many.empty<Row>() }
+                    .andThen { Many.empty<Row>() }
                 Verify.that(
                     merge(slowQuery, cancelAfterDelay), context = PoolContext(p),
-                ).failedWith<DatabaseException.QueryCancelled>(within = 5.seconds)
-                Verify.that(p.close()).completesNormally()
+                ).failsWith<DatabaseException.QueryCancelled>(within = 5.seconds)
+                Verify.that(p.close()).completes()
             },
 
             dynamicTest("stop container") { postgres.stop() },
@@ -274,7 +274,7 @@ class ConnectionManagementIntegrationTest {
                                 .subscribeOn(PoolContext(pool))
                         },
                     )
-                ).assertNext { assertEquals(postgres.username, it) }.completesNormally(within = 10.seconds)
+                ).assertNext { assertEquals(postgres.username, it) }.completes(within = 10.seconds)
             },
 
             dynamicTest("stop container") { postgres.stop() },
@@ -377,8 +377,8 @@ class ConnectionManagementIntegrationTest {
                         .single()
                         .map { it.get<Boolean>("is_primary") },
                     context = PoolContext(p),
-                ).assertNext { assertTrue(it) }.completesNormally(within = 10.seconds)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { assertTrue(it) }.completes(within = 10.seconds)
+                Verify.that(p.close()).completes()
             },
 
             dynamicTest("stop containers") {

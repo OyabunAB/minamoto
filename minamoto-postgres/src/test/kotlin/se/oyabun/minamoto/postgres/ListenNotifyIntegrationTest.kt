@@ -10,7 +10,7 @@ import se.oyabun.aelv.None
 import se.oyabun.aelv.Sinks
 import se.oyabun.aelv.Verify
 import se.oyabun.aelv.take
-import se.oyabun.aelv.then
+import se.oyabun.aelv.andThen
 import se.oyabun.minamoto.NotificationChannel
 import se.oyabun.minamoto.NotificationSerializer
 import se.oyabun.minamoto.PauseBehavior
@@ -78,13 +78,13 @@ class ListenNotifyIntegrationTest {
                 Verify.that(
                     notifier.notify("hello")
                         .delaySubscription(200.milliseconds)
-                        .then { sink.asMany().take(1) },
+                        .andThen { sink.asMany().take(1) },
                     context = PoolContext(pool),
                 ).assertNext { assertEquals("hello", it) }
-                 .completesNormally(within = 5.seconds)
+                 .completes(within = 5.seconds)
 
                 listener.stop()
-                Verify.that(pool.close()).completesNormally()
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("notification payload is delivered correctly") {
@@ -101,14 +101,14 @@ class ListenNotifyIntegrationTest {
                 Verify.that(
                     notifier.notify("alpha")
                         .delaySubscription(200.milliseconds)
-                        .then { notifier.notify("beta") }
-                        .then { notifier.notify("gamma") }
-                        .then { sink.asMany().take(3) },
+                        .andThen { notifier.notify("beta") }
+                        .andThen { notifier.notify("gamma") }
+                        .andThen { sink.asMany().take(3) },
                     context = PoolContext(pool),
-                ).emitsCount(3).completesNormally(within = 5.seconds)
+                ).emitsCount(3).completes(within = 5.seconds)
 
                 listener.stop()
-                Verify.that(pool.close()).completesNormally()
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("Buffer behavior queues notifications while paused and delivers them on resume") {
@@ -128,17 +128,17 @@ class ListenNotifyIntegrationTest {
                 Verify.that(
                     None.defer<Unit> { listener.pause() }
                         .delaySubscription(200.milliseconds)
-                        .then { notifier.notify("one") }
-                        .then { notifier.notify("two") }
-                        .then { None.defer<Unit> { listener.resume() } }
-                        .then { notifier.notify("three") }
-                        .then { sink.asMany().take(3) },
+                        .andThen { notifier.notify("one") }
+                        .andThen { notifier.notify("two") }
+                        .andThen { None.defer<Unit> { listener.resume() } }
+                        .andThen { notifier.notify("three") }
+                        .andThen { sink.asMany().take(3) },
                     context = PoolContext(pool),
                 ).emitsNext("one", "two", "three")
-                 .completesNormally(within = 10.seconds)
+                 .completes(within = 10.seconds)
 
                 listener.stop()
-                Verify.that(pool.close()).completesNormally()
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("Discard behavior drops notifications while paused") {
@@ -157,16 +157,16 @@ class ListenNotifyIntegrationTest {
                 Verify.that(
                     None.defer<Unit> { listener.pause() }
                         .delaySubscription(200.milliseconds)
-                        .then { notifier.notify("dropped") }
-                        .then { None.defer<Unit> { listener.resume() } }
-                        .then { notifier.notify("received") }
-                        .then { sink.asMany().take(1) },
+                        .andThen { notifier.notify("dropped") }
+                        .andThen { None.defer<Unit> { listener.resume() } }
+                        .andThen { notifier.notify("received") }
+                        .andThen { sink.asMany().take(1) },
                     context = PoolContext(pool),
                 ).assertNext { assertEquals("received", it) }
-                 .completesNormally(within = 10.seconds)
+                 .completes(within = 10.seconds)
 
                 listener.stop()
-                Verify.that(pool.close()).completesNormally()
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("stop container") { postgres.stop() },

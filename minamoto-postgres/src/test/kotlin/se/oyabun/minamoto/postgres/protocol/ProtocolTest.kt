@@ -237,7 +237,7 @@ class FramerTest {
                 assertEquals('Z'.code.toByte(), buffer.getByte(0))
                 buffer.release()
             }
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -252,7 +252,7 @@ class FramerTest {
             framed.fold(emptyList<Byte>()) { acc, buf -> acc + buf.getByte(0) }
         ).assertNext { bytes ->
             assertEquals(listOf('1'.code.toByte(), '2'.code.toByte()), bytes)
-        }.completesNormally()
+        }.completes()
     }
 
     @Test
@@ -271,6 +271,6 @@ class FramerTest {
                 assertEquals(messageBytes.size, buffer.readableBytes())
                 buffer.release()
             }
-            .completesNormally()
+            .completes()
     }
 }

@@ -6,11 +6,18 @@ reactive_streams  = "1.0.4"
 r2dbc_spi         = "1.0.0.RELEASE"
 slf4j             = "2.0.18"
 logback           = "1.5.18"
-aelv              = "1.0.0-rc.7"
-aelv_netty        = "1.0.0-rc.5"
+aelv              = "1.0.0"
+aelv_netty        = "1.0.0"
 testcontainers    = "2.0.5"
 serialization     = "1.8.1"
 datetime          = "0.6.2"
+jmh               = "1.37"
+jmh_plugin        = "0.7.3"
+hikari            = "6.3.0"
+postgresql_jdbc   = "42.7.5"
+r2dbc_postgresql  = "1.0.5.RELEASE"
+reactor_core      = "3.7.4"
+r2dbc_pool        = "1.0.2.RELEASE"
 
 [libraries]
 reactive_streams          = { group = "org.reactivestreams",   name = "reactive-streams",                  version.ref = "reactive_streams" }
@@ -23,11 +30,18 @@ kotlin_test_junit5        = { group = "org.jetbrains.kotlin",  name = "kotlin-te
 coroutines_test           = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test",           version.ref = "coroutines" }
 aelv                      = { group = "se.oyabun",             name = "aelv",                              version.ref = "aelv" }
 aelv_netty                = { group = "se.oyabun",             name = "aelv-netty",                        version.ref = "aelv_netty" }
-testcontainers_core       = { group = "org.testcontainers",    name = "testcontainers",                              version.ref = "testcontainers" }
-testcontainers_postgresql = { group = "org.testcontainers",    name = "testcontainers-postgresql",                   version.ref = "testcontainers" }
-testcontainers_junit5     = { group = "org.testcontainers",    name = "testcontainers-junit-jupiter",                version.ref = "testcontainers" }
-serialization_json        = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json",                  version.ref = "serialization" }
-datetime                  = { group = "org.jetbrains.kotlinx", name = "kotlinx-datetime",                              version.ref = "datetime" }
+testcontainers_core       = { group = "org.testcontainers",    name = "testcontainers",                    version.ref = "testcontainers" }
+testcontainers_postgresql = { group = "org.testcontainers",    name = "testcontainers-postgresql",         version.ref = "testcontainers" }
+testcontainers_junit5     = { group = "org.testcontainers",    name = "testcontainers-junit-jupiter",      version.ref = "testcontainers" }
+serialization_json        = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json",       version.ref = "serialization" }
+datetime                  = { group = "org.jetbrains.kotlinx", name = "kotlinx-datetime",                  version.ref = "datetime" }
+jmh_core                  = { group = "org.openjdk.jmh",       name = "jmh-core",                          version.ref = "jmh" }
+jmh_annprocess            = { group = "org.openjdk.jmh",       name = "jmh-generator-annprocess",          version.ref = "jmh" }
+hikari                    = { group = "com.zaxxer",             name = "HikariCP",                          version.ref = "hikari" }
+postgresql_jdbc           = { group = "org.postgresql",         name = "postgresql",                        version.ref = "postgresql_jdbc" }
+r2dbc_postgresql          = { group = "org.postgresql",        name = "r2dbc-postgresql",                  version.ref = "r2dbc_postgresql" }
+reactor_core              = { group = "io.projectreactor",      name = "reactor-core",                      version.ref = "reactor_core" }
+r2dbc_pool                = { group = "io.r2dbc",              name = "r2dbc-pool",                        version.ref = "r2dbc_pool" }
 
 [bundles]
 core_api          = ["reactive_streams", "r2dbc_spi"]
@@ -35,11 +49,13 @@ core              = ["coroutines_core", "slf4j_api", "aelv"]
 core_postgres     = ["coroutines_core", "slf4j_api", "aelv", "aelv_netty", "serialization_json", "datetime"]
 test              = ["kotlin_test", "kotlin_test_junit5", "coroutines_test", "logback_classic"]
 test_containers   = ["testcontainers_core", "testcontainers_postgresql", "testcontainers_junit5"]
+bench_competitors = ["hikari", "postgresql_jdbc", "r2dbc_postgresql", "reactor_core", "r2dbc_pool"]
 
 [plugins]
-kotlin_jvm   = { id = "org.jetbrains.kotlin.jvm",              version.ref = "kotlin" }
-kotlin_serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
-mavenPublish = { id = "maven-publish" }
-signing      = { id = "signing" }
-dokka        = { id = "org.jetbrains.dokka",                   version = "2.2.0" }
-nexusPublish = { id = "io.github.gradle-nexus.publish-plugin", version = "2.0.0" }
+kotlin_jvm           = { id = "org.jetbrains.kotlin.jvm",                         version.ref = "kotlin" }
+kotlin_serialization = { id = "org.jetbrains.kotlin.plugin.serialization",        version.ref = "kotlin" }
+mavenPublish         = { id = "maven-publish" }
+signing              = { id = "signing" }
+dokka                = { id = "org.jetbrains.dokka",                               version = "2.2.0" }
+nexusPublish         = { id = "io.github.gradle-nexus.publish-plugin",            version = "2.0.0" }
+jmh                  = { id = "me.champeau.jmh",                                  version.ref = "jmh_plugin" }

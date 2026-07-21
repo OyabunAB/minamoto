@@ -23,7 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import se.oyabun.aelv.None
 import se.oyabun.aelv.await
-import se.oyabun.aelv.getOrThrow
+import se.oyabun.aelv.rightOrThrow
 import se.oyabun.aelv.subscribeOn
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.Listener
@@ -95,7 +95,7 @@ internal class PostgresListener<T>(
     }
 
     private suspend fun acquireAndListen() {
-        val acquired = pool.acquireSlot().await().getOrThrow()
+        val acquired = pool.acquireSlot().await().rightOrThrow()
         if (acquired !is AcquireResult.Acquired) {
             throw DatabaseException.AcquireTimeout(pool.config.acquireTimeout)
         }
@@ -151,7 +151,7 @@ internal class PostgresListener<T>(
                     continue
                 }
                 runCatching {
-                    handler(decoded).await().getOrThrow()
+                    handler(decoded).await().rightOrThrow()
                 }.onFailure { e ->
                     log.connection.error(connection.id, e)
                 }
@@ -170,7 +170,7 @@ internal class PostgresListener<T>(
     }
 
     private suspend fun sendSimple(connection: PostgresConnection, sql: String) {
-        connection.executeSimpleCommand(sql).await().getOrThrow()
+        connection.executeSimpleCommand(sql).await().rightOrThrow()
     }
 }
 

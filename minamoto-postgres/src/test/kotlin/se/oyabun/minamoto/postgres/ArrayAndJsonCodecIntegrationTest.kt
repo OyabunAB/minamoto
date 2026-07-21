@@ -80,7 +80,7 @@ class ArrayAndJsonCodecIntegrationTest {
                         @Suppress("UNCHECKED_CAST")
                         row.get<List<*>>("v") as List<Int>
                     }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf(1, 2, 3), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf(1, 2, 3), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("INT8[] column decoded as List<Long>") {
                 Verify.that(
@@ -88,7 +88,7 @@ class ArrayAndJsonCodecIntegrationTest {
                         @Suppress("UNCHECKED_CAST")
                         row.get<List<*>>("v") as List<Long>
                     }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf(1L, 2L, 3L), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf(1L, 2L, 3L), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("FLOAT8[] column decoded as List<Double>") {
                 Verify.that(
@@ -99,7 +99,7 @@ class ArrayAndJsonCodecIntegrationTest {
                 ).assertNext { result ->
                     assertEquals(3, result.size)
                     assertEquals(1.1, result[0], 0.001)
-                }.completesNormally(within = TEST_TIMEOUT)
+                }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("BOOL[] column decoded as List<Boolean>") {
                 Verify.that(
@@ -107,7 +107,7 @@ class ArrayAndJsonCodecIntegrationTest {
                         @Suppress("UNCHECKED_CAST")
                         row.get<List<*>>("v") as List<Boolean>
                     }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf(true, false, true), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf(true, false, true), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("TEXT[] column decoded as List<String>") {
                 Verify.that(
@@ -115,7 +115,7 @@ class ArrayAndJsonCodecIntegrationTest {
                         @Suppress("UNCHECKED_CAST")
                         row.get<List<*>>("v") as List<String>
                     }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf("foo", "bar", "baz"), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf("foo", "bar", "baz"), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("UUID[] column decoded as List<UUID>") {
                 Verify.that(
@@ -124,7 +124,7 @@ class ArrayAndJsonCodecIntegrationTest {
                             @Suppress("UNCHECKED_CAST")
                             row.get<List<*>>("v") as List<UUID>
                         }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf(UUID.fromString("550e8400-e29b-41d4-a716-446655440000")), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf(UUID.fromString("550e8400-e29b-41d4-a716-446655440000")), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("TIMESTAMP[] column decoded as List<LocalDateTime>") {
                 Verify.that(
@@ -132,7 +132,7 @@ class ArrayAndJsonCodecIntegrationTest {
                         @Suppress("UNCHECKED_CAST")
                         row.get<List<*>>("v") as List<LocalDateTime>
                     }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf(LocalDateTime(2026, 7, 14, 10, 0, 0)), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf(LocalDateTime(2026, 7, 14, 10, 0, 0)), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("TIMESTAMPTZ[] column decoded as List<Instant>") {
                 Verify.that(
@@ -140,7 +140,7 @@ class ArrayAndJsonCodecIntegrationTest {
                         @Suppress("UNCHECKED_CAST")
                         row.get<List<*>>("v") as List<Instant>
                     }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf(Instant.parse("2026-07-14T10:00:00Z")), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf(Instant.parse("2026-07-14T10:00:00Z")), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("NUMERIC[] column decoded as List<BigDecimal>") {
                 Verify.that(
@@ -148,23 +148,23 @@ class ArrayAndJsonCodecIntegrationTest {
                         @Suppress("UNCHECKED_CAST")
                         row.get<List<*>>("v") as List<BigDecimal>
                     }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf(BigDecimal("1.5"), BigDecimal("2.5")), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf(BigDecimal("1.5"), BigDecimal("2.5")), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("empty array round-trips as empty List") {
                 Verify.that(
                     database.query("SELECT ARRAY[]::int4[] AS v").single().map { row -> row.get<List<*>>("v") }, context = PoolContext(pool),
-                ).assertNext { assertEquals(emptyList<Int>(), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(emptyList<Int>(), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("single-element array round-trips") {
                 Verify.that(
                     database.query("SELECT ARRAY[42]::int4[] AS v").single().map { row -> row.get<List<*>>("v") }, context = PoolContext(pool),
-                ).assertNext { assertEquals(listOf(42), it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(listOf(42), it) }.completes(within = TEST_TIMEOUT)
             },
             dynamicTest("null element in array throws CodecFailed") {
                 Verify.that(
                     database.query("SELECT ARRAY[1, NULL, 3]::int4[] AS v").single()
                         .map { row -> row.get<List<*>>("v") }, context = PoolContext(pool),
-                ).failedWith<DatabaseException.CodecFailed>(within = TEST_TIMEOUT)
+                ).failsWith<DatabaseException.CodecFailed>(within = TEST_TIMEOUT)
             },
 
             // --- JSON codecs ---
@@ -176,8 +176,8 @@ class ArrayAndJsonCodecIntegrationTest {
                 Verify.that(
                     db.query("SELECT '{\"id\":1,\"name\":\"walter\"}'::json AS v")
                         .single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
-                ).assertNext { assertEquals(Payload(1, "walter"), it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { assertEquals(Payload(1, "walter"), it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
             dynamicTest("jsonb column decoded as @Serializable data class") {
                 val registry = CodecRegistry()
@@ -186,8 +186,8 @@ class ArrayAndJsonCodecIntegrationTest {
                 Verify.that(
                     db.query("SELECT '{\"id\":2,\"name\":\"jesse\"}'::jsonb AS v")
                         .single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
-                ).assertNext { assertEquals(Payload(2, "jesse"), it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { assertEquals(Payload(2, "jesse"), it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
             dynamicTest("@Serializable parameter encoded into json column") {
                 val registry = CodecRegistry()
@@ -196,8 +196,8 @@ class ArrayAndJsonCodecIntegrationTest {
                 val (db, p) = connect(postgres, registry)
                 Verify.that(
                     db.query("SELECT :v::json AS v").bind("v" to payload).single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
-                ).assertNext { assertEquals(payload, it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { assertEquals(payload, it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
             dynamicTest("@Serializable parameter encoded into jsonb column") {
                 val registry = CodecRegistry()
@@ -206,8 +206,8 @@ class ArrayAndJsonCodecIntegrationTest {
                 val (db, p) = connect(postgres, registry)
                 Verify.that(
                     db.query("SELECT :v::jsonb AS v").bind("v" to payload).single().map { row -> row.get<Payload>("v") }, context = PoolContext(p),
-                ).assertNext { assertEquals(payload, it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { assertEquals(payload, it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
             dynamicTest("json null column returns null via getOrNull") {
                 val registry = CodecRegistry()
@@ -215,12 +215,12 @@ class ArrayAndJsonCodecIntegrationTest {
                 val (db, p) = connect(postgres, registry)
                 Verify.that(
                     db.query("SELECT NULL::json AS v").single(), context = PoolContext(p),
-                ).assertNext { row -> assertNull(row.getOrNull<Payload>("v")) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(p.close()).completesNormally()
+                ).assertNext { row -> assertNull(row.getOrNull<Payload>("v")) }.completes(within = TEST_TIMEOUT)
+                Verify.that(p.close()).completes()
             },
 
             dynamicTest("stop container") {
-                Verify.that(pool.close()).completesNormally()
+                Verify.that(pool.close()).completes()
                 postgres.stop()
             },
         )

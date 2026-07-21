@@ -35,7 +35,7 @@ import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.firstMaybe
 import se.oyabun.aelv.or
 import se.oyabun.aelv.flatMapNone
-import se.oyabun.aelv.getOrThrow
+import se.oyabun.aelv.rightOrThrow
 import se.oyabun.aelv.map
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
@@ -44,8 +44,8 @@ import se.oyabun.aelv.drain
 import se.oyabun.aelv.resource
 import se.oyabun.aelv.subscribeOn
 import se.oyabun.aelv.Either
-import se.oyabun.aelv.then
-import se.oyabun.aelv.TimeoutException
+import se.oyabun.aelv.andThen
+import se.oyabun.aelv.ExceededTimeoutException
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.coroutineContext
 import kotlin.internal.LowPriorityInOverloadResolution
@@ -107,7 +107,7 @@ class MinamotoPool(
      */
     private fun createSlot(): None<Connection> =
         None.defer<Unit> { connectionBudget?.acquire() }
-            .then { factory.create().retry(config.acquireRetry.toLong()) }
+            .andThen { factory.create().retry(config.acquireRetry.toLong()) }
             .flatMapNone { connection ->
                 None.defer<Unit> {
                     createLock.withLock {
@@ -126,7 +126,7 @@ class MinamotoPool(
             }
             .recover { e ->
                 None.defer<Unit> { connectionBudget?.release() }
-                    .then { None.error(DatabaseException.ConnectionLost(
+                    .andThen { None.error(DatabaseException.ConnectionLost(
                         "failed to create connection after ${config.acquireRetry} retries", e
                     )) }
             }
@@ -156,15 +156,15 @@ class MinamotoPool(
                     return@flatMap One.single(AcquireResult.DeadlockPrevented(held, config.maxSize))
 
                 None.defer<Unit> { waiting.incrementAndGet() }
-                    .then { maybeCreateSlot() }
-                    .then {
+                    .andThen { maybeCreateSlot() }
+                    .andThen {
                         One.generate<PoolSlot> { downstream ->
                             val deadline = System.nanoTime() + config.acquireTimeout.inWholeNanoseconds
                             while (true) {
                                 val slot = idleQueue.poll()
                                 if (slot != null) { downstream(Signal.Upstream.Next(slot)); break }
                                 val remaining = (deadline - System.nanoTime()).coerceAtLeast(0)
-                                if (remaining == 0L) { downstream(Signal.Upstream.Error(TimeoutException(config.acquireTimeout))); break }
+                                if (remaining == 0L) { downstream(Signal.Upstream.Error(ExceededTimeoutException(config.acquireTimeout))); break }
                                 withTimeoutOrNull(remaining / 1_000_000) { idleSignal.receive() }
                             }
                             downstream(Signal.Upstream.Complete)
@@ -174,7 +174,7 @@ class MinamotoPool(
                     .map { slot: PoolSlot -> slot.copy(state = SlotState.Acquired, lastUsed = System.nanoTime()).also { slots[it.id] = it } }
                     .flatMap { slot -> validateAndHook(slot) }
                     .map { slot -> ctx.acquire(slot.id, poolId); AcquireResult.Acquired(slot) as AcquireResult }
-                    .recover { e -> if (e is TimeoutException) One.single(AcquireResult.TimedOut as AcquireResult) else throw e }
+                    .recover { e -> if (e is ExceededTimeoutException) One.single(AcquireResult.TimedOut as AcquireResult) else throw e }
             }
 
     private fun validateAndHook(slot: PoolSlot): One<PoolSlot> =
@@ -204,10 +204,10 @@ class MinamotoPool(
             is ConnectionHook.Action -> None.defer<Unit> { hook.block() }
                 .recover { e -> invalidate(id); return@recover null as Nothing }
         }
-        .then {
+        .andThen {
             None.defer<Unit> { coroutineContext[ConnectionContext]?.release(id) }
         }
-        .then {
+        .andThen {
             if (now - slot.createdAt > config.maxLifetime.inWholeNanoseconds ||
                 now - slot.lastUsed  > config.idleTimeout.inWholeNanoseconds)
                 invalidate(id)
@@ -216,7 +216,7 @@ class MinamotoPool(
                 idleQueue.add(slots[id]!!)
                 idleSignal.trySend(Unit)
                 if (config.eviction is EvictionPolicy.OnRelease) evict()
-            }.then { maybeCreateSlot() }
+            }.andThen { maybeCreateSlot() }
         }
     }
 
@@ -225,7 +225,7 @@ class MinamotoPool(
         total.decrementAndGet()
         return factory.destroy(slot.connection)
             .recover { None.complete<Unit>() }
-            .then { None.defer<Unit> { connectionBudget?.release(); maybeCreateSlot().await() } }
+            .andThen { None.defer<Unit> { connectionBudget?.release(); maybeCreateSlot().await() } }
     }
 
     override fun close(): None<Unit> =
@@ -233,9 +233,10 @@ class MinamotoPool(
             .flatMapNone { slot ->
                 factory.destroy(slot.connection)
                     .recover { None.complete<Unit>() }
-                    .then { None.defer<Unit> { connectionBudget?.release() } }
+                    .andThen { None.defer<Unit> { connectionBudget?.release() } }
+                    .andThen { None.complete() }
             }
-            .then {
+            .andThen {
                 None.defer<Unit> {
                     scope.cancel()
                     idleSignal.close()
@@ -244,12 +245,13 @@ class MinamotoPool(
                 }
             }
 
-    private fun warmUp(): None<Int> =
+    private fun warmUp(): None<Unit> =
         Many.range(0, config.initialSize)
             .flatMapNone { _: Int ->
-                if (total.get() < config.maxSize) createSlot()
-                else None.complete<Connection>()
+                if (total.get() < config.maxSize) createSlot().andThen { None.complete() }
+                else None.complete()
             }
+            .andThen { None.complete<Unit>() }
 
     private fun evict() {
         val now   = System.nanoTime()
@@ -259,7 +261,7 @@ class MinamotoPool(
         }
         scope.launch {
             Many.from(stale)
-                .flatMapNone { slot -> invalidate(slot.id) }
+                .flatMapNone { slot -> invalidate(slot.id).andThen { None.complete() } }
                 .await()
         }
     }
@@ -281,7 +283,7 @@ class MinamotoPool(
         definition: TransactionDefinition = TransactionDefinition(),
         block:      suspend () -> T,
     ): T {
-        val handle = openTransaction(definition).await().getOrThrow()
+        val handle = openTransaction(definition).await().rightOrThrow()
         return try {
             val result = withContext(handle.txContext) { block() }
             closeTransaction<Unit>(handle, Either.success(Unit)).await()
@@ -334,7 +336,7 @@ class MinamotoPool(
                         releaseSlot = false,
                     )
                     existingSlot.connection.savepoint(savepointId)
-                        .then { One.single(handle) }
+                        .andThen { One.single(handle) }
                 } else {
                     val transactionId = TransactionId(transactionIdCounter.incrementAndGet())
                     val handle = TransactionHandle(
@@ -345,7 +347,7 @@ class MinamotoPool(
                         releaseSlot = true,
                     )
                     slot.connection.begin(definition)
-                        .then { One.single(handle) }
+                        .andThen { One.single(handle) }
                 }
             })
 
@@ -363,7 +365,7 @@ class MinamotoPool(
             else
                 handle.connection.commit()
             if (handle.releaseSlot)
-                endTransaction.then { release(handle.slotId) }
+                endTransaction.andThen { release(handle.slotId) }
             else
                 endTransaction
         } as None<T>

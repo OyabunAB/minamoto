@@ -9,12 +9,13 @@ import org.testcontainers.utility.DockerImageName
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.One
 import se.oyabun.aelv.Verify
+import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.fold
 import se.oyabun.aelv.map
 import se.oyabun.aelv.take
-import se.oyabun.aelv.then
+import se.oyabun.aelv.andThen
 import se.oyabun.minamoto.DatabaseException
 import se.oyabun.minamoto.PoolContext
 import se.oyabun.minamoto.pool.MinamotoPool
@@ -63,47 +64,47 @@ class ProtocolIntegrationTest {
                     validation = ValidationQuery.None))
                 Verify.that(
                     database.run("CREATE TABLE proto_test (id SERIAL PRIMARY KEY, val TEXT NOT NULL UNIQUE)").execute()
-                        .then { database.run("CREATE TABLE proto_fk_parent (id INT PRIMARY KEY)").execute() }
-                        .then { database.run("CREATE TABLE proto_fk_child (parent_id INT REFERENCES proto_fk_parent(id))").execute() }
-                        .then { database.run("CREATE USER limited_user PASSWORD 'pass' NOSUPERUSER").execute() },
+                        .andThen { database.run("CREATE TABLE proto_fk_parent (id INT PRIMARY KEY)").execute() }
+                        .andThen { database.run("CREATE TABLE proto_fk_child (parent_id INT REFERENCES proto_fk_parent(id))").execute() }
+                        .andThen { database.run("CREATE USER limited_user PASSWORD 'pass' NOSUPERUSER").execute() },
                     context = PoolContext(pool),
-                ).completesNormally(within = 5.seconds)
+                ).completes(within = 5.seconds)
             },
 
             dynamicTest("unique constraint violation sqlState 23505 surfaces as UniqueViolation") {
                 Verify.that(
                     database.run("INSERT INTO proto_test (val) VALUES ('dup')").execute()
-                        .then { database.run("INSERT INTO proto_test (val) VALUES ('dup')").execute() },
+                        .andThen { database.run("INSERT INTO proto_test (val) VALUES ('dup')").execute() },
                     context = PoolContext(pool),
-                ).failedWith<DatabaseException.UniqueViolation>(within = TEST_TIMEOUT)
+                ).failsWith<DatabaseException.UniqueViolation>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("not-null violation sqlState 23502 surfaces as NotNullViolation") {
                 Verify.that(
                     database.run("INSERT INTO proto_test (val) VALUES (NULL)").execute(),
                     context = PoolContext(pool),
-                ).failedWith<DatabaseException.NotNullViolation>(within = TEST_TIMEOUT)
+                ).failsWith<DatabaseException.NotNullViolation>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("foreign key violation sqlState 23503 surfaces as ForeignKeyViolation") {
                 Verify.that(
                     database.run("INSERT INTO proto_fk_child (parent_id) VALUES (999)").execute(),
                     context = PoolContext(pool),
-                ).failedWith<DatabaseException.ForeignKeyViolation>(within = TEST_TIMEOUT)
+                ).failsWith<DatabaseException.ForeignKeyViolation>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("undefined table sqlState 42P01 surfaces as UndefinedTable") {
                 Verify.that(
                     database.query("SELECT * FROM no_such_table").multiple().discard(),
                     context = PoolContext(pool),
-                ).failedWith<DatabaseException.UndefinedTable>(within = TEST_TIMEOUT)
+                ).failsWith<DatabaseException.UndefinedTable>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("undefined column sqlState 42703 surfaces as UndefinedColumn") {
                 Verify.that(
                     database.query("SELECT no_such_col FROM proto_test").multiple().discard(),
                     context = PoolContext(pool),
-                ).failedWith<DatabaseException.UndefinedColumn>(within = TEST_TIMEOUT)
+                ).failsWith<DatabaseException.UndefinedColumn>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("permission denied sqlState 42501 surfaces as PermissionDenied") {
@@ -119,15 +120,15 @@ class ProtocolIntegrationTest {
                 Verify.that(
                     limitedDb.query("SELECT * FROM proto_test").multiple().discard(),
                     context = PoolContext(limitedPool),
-                ).failedWith<DatabaseException.PermissionDenied>(within = TEST_TIMEOUT)
-                Verify.that(limitedPool.close()).completesNormally()
+                ).failsWith<DatabaseException.PermissionDenied>(within = TEST_TIMEOUT)
+                Verify.that(limitedPool.close()).completes()
             },
 
             dynamicTest("syntax error sqlState 42601 surfaces as SyntaxError") {
                 Verify.that(
                     database.query("SELEKT 1").multiple().discard(),
                     context = PoolContext(pool),
-                ).failedWith<DatabaseException.SyntaxError>(within = TEST_TIMEOUT)
+                ).failsWith<DatabaseException.SyntaxError>(within = TEST_TIMEOUT)
             },
 
             dynamicTest("large result set streams via PortalSuspended across multiple Execute rounds") {
@@ -136,11 +137,11 @@ class ProtocolIntegrationTest {
                         "INSERT INTO proto_test (val) SELECT 'row_' || g FROM generate_series(1,200) g"
                     ).execute(),
                     context = PoolContext(pool),
-                ).completesNormally(within = TEST_TIMEOUT)
+                ).completes(within = TEST_TIMEOUT)
                 Verify.that(
                     database.query("SELECT count(*) AS n FROM proto_test").single().map { it.get<Long>("n") },
                     context = PoolContext(pool),
-                ).assertNext { assertTrue(it >= 200) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertTrue(it >= 200) }.completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("fetchSize 1 streams one row per Execute round-trip") {
@@ -148,7 +149,7 @@ class ProtocolIntegrationTest {
                     database.query("SELECT val FROM proto_test LIMIT 5").multiple()
                         .fold(0) { acc, _ -> acc + 1 },
                     context = PoolContext(pool),
-                ).assertNext { assertEquals(5, it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(5, it) }.completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("cancelling stream mid-flight leaves connection usable") {
@@ -156,11 +157,11 @@ class ProtocolIntegrationTest {
                     database.query("SELECT val FROM proto_test").multiple()
                         .take(1).fold(0) { acc, _ -> acc + 1 },
                     context = PoolContext(pool),
-                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(1, it) }.completes(within = TEST_TIMEOUT)
                 Verify.that(
                     database.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(pool),
-                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(1, it) }.completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("INSERT RETURNING delivers generated id as row") {
@@ -168,7 +169,7 @@ class ProtocolIntegrationTest {
                     database.query("INSERT INTO proto_test (val) VALUES ('ret1') RETURNING id")
                         .single().map { it.get<Int>("id") },
                     context = PoolContext(pool),
-                ).assertNext { assertTrue(it > 0) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertTrue(it > 0) }.completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("UPDATE RETURNING delivers updated columns") {
@@ -176,7 +177,7 @@ class ProtocolIntegrationTest {
                     database.query("UPDATE proto_test SET val = 'upd_' || id WHERE id = 1 RETURNING id, val")
                         .single().map { it.get<String>("val") },
                     context = PoolContext(pool),
-                ).assertNext { assertTrue(it.startsWith("upd_")) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertTrue(it.startsWith("upd_")) }.completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("INSERT RETURNING with multiple columns delivers full row") {
@@ -185,7 +186,7 @@ class ProtocolIntegrationTest {
                         .single().map { row -> row.get<Int>("id") to row.get<String>("val") },
                     context = PoolContext(pool),
                 ).assertNext { (id, v) -> assertTrue(id > 0); assertEquals("ret2", v) }
-                    .completesNormally(within = TEST_TIMEOUT)
+                    .completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("SET timezone updates serverParameters on next query") {
@@ -202,15 +203,15 @@ class ProtocolIntegrationTest {
                 Verify.that(
                     tzDatabase.query("SHOW timezone").single().map { it.get<String>("TimeZone") },
                     context = PoolContext(tzPool),
-                ).assertNext { assertEquals("America/New_York", it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(tzPool.close()).completesNormally()
+                ).assertNext { assertEquals("America/New_York", it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(tzPool.close()).completes()
             },
 
             dynamicTest("server RAISE NOTICE is surfaced without failing the query") {
                 Verify.that(
                     database.run("DO $$ BEGIN RAISE NOTICE 'test notice'; END $$").execute(),
                     context = PoolContext(pool),
-                ).completesNormally(within = TEST_TIMEOUT)
+                ).completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("same SQL executed twice reuses cached prepared statement") {
@@ -219,7 +220,7 @@ class ProtocolIntegrationTest {
                     database.query(sql).single()
                         .flatMapMany { database.query(sql).single().toMany() },
                     context = PoolContext(pool),
-                ).completesNormally(within = TEST_TIMEOUT)
+                ).completes(within = TEST_TIMEOUT)
             },
 
             dynamicTest("cache eviction under bounded size forces re-prepare") {
@@ -236,20 +237,20 @@ class ProtocolIntegrationTest {
                 Verify.that(
                     cachingDatabase.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(cachingPool),
-                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(1, it) }.completes(within = TEST_TIMEOUT)
                 Verify.that(
                     cachingDatabase.query("SELECT 2 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(cachingPool),
-                ).assertNext { assertEquals(2, it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(2, it) }.completes(within = TEST_TIMEOUT)
                 Verify.that(
                     cachingDatabase.query("SELECT 3 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(cachingPool),
-                ).assertNext { assertEquals(3, it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(3, it) }.completes(within = TEST_TIMEOUT)
                 Verify.that(
                     cachingDatabase.query("SELECT 1 AS n").single().map { it.get<Int>("n") },
                     context = PoolContext(cachingPool),
-                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(cachingPool.close()).completesNormally()
+                ).assertNext { assertEquals(1, it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(cachingPool.close()).completes()
             },
 
             dynamicTest("disabled cache re-parses on every execution") {
@@ -267,19 +268,19 @@ class ProtocolIntegrationTest {
                 Verify.that(
                     noCacheDatabase.query(sql).single().map { it.get<String>("val") },
                     context = PoolContext(noCachePool),
-                ).completesNormally(within = TEST_TIMEOUT)
+                ).completes(within = TEST_TIMEOUT)
                 Verify.that(
                     noCacheDatabase.query(sql).single().map { it.get<String>("val") },
                     context = PoolContext(noCachePool),
-                ).completesNormally(within = TEST_TIMEOUT)
-                Verify.that(noCachePool.close()).completesNormally()
+                ).completes(within = TEST_TIMEOUT)
+                Verify.that(noCachePool.close()).completes()
             },
 
             dynamicTest("concurrent statements on one connection use distinct portal names") {
                 val inner: () -> Many<Int> = {
                     database.query("SELECT id FROM proto_test ORDER BY id")
                         .multiple()
-                        .flatMap { row: se.oyabun.minamoto.Row ->
+                        .concatMap { row: se.oyabun.minamoto.Row ->
                             database.query("SELECT id FROM proto_test WHERE id = :id")
                                 .bind("id" to row.get<Int>("id"))
                                 .single()
@@ -290,7 +291,7 @@ class ProtocolIntegrationTest {
                 Verify.that(
                     pool.transactionally(se.oyabun.minamoto.TransactionDefinition(), inner),
                     context = PoolContext(pool),
-                ).completesNormally(within = 5.seconds)
+                ).completes(within = 5.seconds)
             },
 
             dynamicTest("invalidated cached statement is transparently re-prepared") {
@@ -308,23 +309,23 @@ class ProtocolIntegrationTest {
                 Verify.that(
                     database.run("CREATE TABLE proto_cache_test (id INT)").execute(),
                     context = PoolContext(pool),
-                ).completesNormally(within = TEST_TIMEOUT)
+                ).completes(within = TEST_TIMEOUT)
                 Verify.that(
                     cachingDatabase.query(sql).single().map { it.get<Long>("n") },
                     context = PoolContext(cachingPool),
-                ).assertNext { assertEquals(0L, it) }.completesNormally(within = TEST_TIMEOUT)
+                ).assertNext { assertEquals(0L, it) }.completes(within = TEST_TIMEOUT)
                 // Drop and recreate — server invalidates the prepared statement (SQLSTATE 26000)
                 Verify.that(
                     database.run("DROP TABLE proto_cache_test").execute()
-                        .then { database.run("CREATE TABLE proto_cache_test (id INT)").execute() },
+                        .andThen { database.run("CREATE TABLE proto_cache_test (id INT)").execute() },
                     context = PoolContext(pool),
-                ).completesNormally(within = TEST_TIMEOUT)
+                ).completes(within = TEST_TIMEOUT)
                 // Driver must evict cache and re-prepare transparently
                 Verify.that(
                     cachingDatabase.query(sql).single().map { it.get<Long>("n") },
                     context = PoolContext(cachingPool),
-                ).assertNext { assertEquals(0L, it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(cachingPool.close()).completesNormally()
+                ).assertNext { assertEquals(0L, it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(cachingPool.close()).completes()
             },
 
             dynamicTest("stop container") { postgres.stop() },

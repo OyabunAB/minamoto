@@ -96,8 +96,8 @@ class TlsIntegrationTest {
                 val (db, pool) = connectWithPool(postgres, SslMode.Disable)
                 Verify.that(
                     db.query("SELECT 1 AS n").single().map { it.get<Int>("n") }, context = PoolContext(pool),
-                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(pool.close()).completesNormally()
+                ).assertNext { assertEquals(1, it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("SslMode.Require connects and pg_stat_ssl confirms SSL") {
@@ -105,8 +105,8 @@ class TlsIntegrationTest {
                 Verify.that(
                     db.query("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
                         .single().map { it.get<Boolean>("ssl") }, context = PoolContext(pool),
-                ).assertNext { assertTrue(it, "expected SSL but pg_stat_ssl reports ssl=false") }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(pool.close()).completesNormally()
+                ).assertNext { assertTrue(it, "expected SSL but pg_stat_ssl reports ssl=false") }.completes(within = TEST_TIMEOUT)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("SslMode.Prefer connects with TLS when server supports it") {
@@ -114,16 +114,16 @@ class TlsIntegrationTest {
                 Verify.that(
                     db.query("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
                         .single().map { it.get<Boolean>("ssl") }, context = PoolContext(pool),
-                ).assertNext { assertTrue(it, "SslMode.Prefer should use TLS when server supports it") }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(pool.close()).completesNormally()
+                ).assertNext { assertTrue(it, "SslMode.Prefer should use TLS when server supports it") }.completes(within = TEST_TIMEOUT)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("SslMode.Verify fails with self-signed cert and no trust store") {
                 val (db, pool) = connectWithPool(postgres, SslMode.Verify())
                 Verify.that(
                     db.query("SELECT 1 AS n").single().map { it.get<Int>("n") }, context = PoolContext(pool),
-                ).failed(within = 15.seconds)
-                Verify.that(pool.close()).completesNormally()
+                ).fails(within = 15.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("stop SSL container") { postgres.stop() },
@@ -141,16 +141,16 @@ class TlsIntegrationTest {
                 val (db, pool) = connectWithPool(postgres, SslMode.Prefer)
                 Verify.that(
                     db.query("SELECT 1 AS n").single().map { it.get<Int>("n") }, context = PoolContext(pool),
-                ).assertNext { assertEquals(1, it) }.completesNormally(within = TEST_TIMEOUT)
-                Verify.that(pool.close()).completesNormally()
+                ).assertNext { assertEquals(1, it) }.completes(within = TEST_TIMEOUT)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("SslMode.Require throws when server has no SSL") {
                 val (db, pool) = connectWithPool(postgres, SslMode.Require)
                 Verify.that(
                     db.query("SELECT 1 AS n").single().map { it.get<Int>("n") }, context = PoolContext(pool),
-                ).failed(within = 15.seconds)
-                Verify.that(pool.close()).completesNormally()
+                ).fails(within = 15.seconds)
+                Verify.that(pool.close()).completes()
             },
 
             dynamicTest("stop plain container") { postgres.stop() },

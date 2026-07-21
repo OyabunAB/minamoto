@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.mavenPublish)
     alias(libs.plugins.signing)
     alias(libs.plugins.dokka)
+    alias(libs.plugins.jmh)
 }
 
 dependencies {
@@ -14,6 +15,14 @@ dependencies {
     implementation(libs.bundles.core.postgres)
     testImplementation(libs.bundles.test)
     testImplementation(libs.bundles.test.containers)
+
+    // JMH benchmark competitors — jmh scope only, never included in the published jar
+    jmhImplementation(libs.aelv)
+    jmhImplementation(libs.bundles.bench.competitors)
+    jmhImplementation(libs.testcontainers.postgresql)
+    jmhImplementation(libs.logback.classic)
+    jmhImplementation(libs.coroutines.core)
+    jmh(libs.jmh.annprocess)
 }
 
 val signingKey: String? = System.getenv("GPG_SIGNING_KEY")
@@ -27,6 +36,25 @@ kotlin {
 val jvmTargetVersion = JvmTarget.fromTarget(libs.versions.jvm.get())
 tasks.compileKotlin { compilerOptions { jvmTarget.set(jvmTargetVersion) } }
 tasks.compileTestKotlin { compilerOptions { jvmTarget.set(jvmTargetVersion) } }
+
+tasks.named("compileJmhKotlin") {
+    (this as org.jetbrains.kotlin.gradle.tasks.KotlinCompile)
+        .compilerOptions { jvmTarget.set(jvmTargetVersion) }
+}
+
+jmh {
+    warmupIterations.set(3)
+    warmup.set("5s")
+    iterations.set(5)
+    timeOnIteration.set("10s")
+    fork.set(1)
+    resultFormat.set("JSON")
+    resultsFile.set(project.file("${project.layout.buildDirectory.get()}/reports/jmh/results.json"))
+    jvmArgsAppend.add("-Dorg.slf4j.simpleLogger.log.org.openjdk.jmh=WARN")
+    if (project.hasProperty("jmh.include")) {
+        includes.add(project.property("jmh.include").toString())
+    }
+}
 
 tasks.test {
     useJUnitPlatform()

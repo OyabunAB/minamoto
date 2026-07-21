@@ -1,0 +1,22 @@
+<configuration>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss} %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Silence noisy drivers during benchmark runs -->
+  <logger name="se.oyabun"               level="WARN"/>
+  <logger name="io.r2dbc"               level="WARN"/>
+  <logger name="org.postgresql"         level="WARN"/>
+  <logger name="io.netty"               level="WARN"/>
+  <logger name="com.zaxxer.hikari"      level="WARN"/>
+  <logger name="io.projectreactor"      level="WARN"/>
+  <logger name="org.testcontainers"     level="WARN"/>
+  <logger name="com.github.dockerjava" level="WARN"/>
+  <logger name="tc"                     level="WARN"/>
+
+  <root level="WARN">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>

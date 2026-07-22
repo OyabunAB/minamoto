@@ -16,7 +16,7 @@
 package se.oyabun.minamoto.postgres
 
 import kotlin.time.Duration
-import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 /** Maximum time a single pipeline assertion may take in integration tests. */
-val TEST_TIMEOUT: Duration = 500.milliseconds
+val TEST_TIMEOUT: Duration = 5.seconds

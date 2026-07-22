@@ -427,7 +427,9 @@ private fun negotiateSsl(connection: NettyConnection, host: String, sslMode: Ssl
             when {
                 response == 'S'.code.toByte() ->
                     One.defer<ChannelBinding> {
-                        connection.upgradeTls(sslMode, host)
+                        // Prefer: server accepted — upgrade with insecure trust (same as Require)
+                        val effectiveMode = if (sslMode is SslMode.Prefer) SslMode.Require else sslMode
+                        connection.upgradeTls(effectiveMode, host)
                         connection.channelBinding()
                     }
                 response == 'N'.code.toByte() && sslMode is SslMode.Prefer ->

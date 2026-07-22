@@ -16,7 +16,7 @@ jmh_plugin        = "0.7.3"
 hikari            = "6.3.0"
 postgresql_jdbc   = "42.7.5"
 r2dbc_postgresql  = "1.0.5.RELEASE"
-reactor_core      = "3.7.4"
+reactor_core      = "3.8.6"
 r2dbc_pool        = "1.0.2.RELEASE"
 
 [libraries]
